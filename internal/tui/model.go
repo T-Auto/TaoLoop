@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 type mode int
@@ -57,6 +58,13 @@ var (
 			BorderForeground(lipgloss.Color("#4D4D4D")).
 			PaddingLeft(1).
 			Foreground(lipgloss.Color("#9F9F9F"))
+	logHeaderStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#F2F2F2"))
+	logLineStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#D0D0D0"))
+	logOmittedStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#8C8C8C"))
 	codeLineStyle = lipgloss.NewStyle().
 			Background(lipgloss.Color("#111111")).
 			Foreground(lipgloss.Color("#F5F5F5")).
@@ -123,6 +131,26 @@ var timeNow = time.Now
 
 const pasteBurstWindow = 40 * time.Millisecond
 
+const (
+	foldedPreviewHeadLines = 2
+	foldedPreviewTailLines = 2
+	defaultInputHeight     = 4
+)
+
+type pageLayout struct {
+	width  int
+	height int
+}
+
+type chatLayout struct {
+	pageWidth         int
+	pageHeight        int
+	panelContentWidth int
+	transcriptHeight  int
+	inputHeight       int
+	valid             bool
+}
+
 type Model struct {
 	rootDir string
 	backend *BackendClient
@@ -140,10 +168,12 @@ type Model struct {
 	viewport viewport.Model
 	input    textarea.Model
 
-	sessions      []SessionSummary
-	activeSession *SessionRecord
-	followTail    bool
-	pendingDelete *SessionSummary
+	sessions         []SessionSummary
+	activeSession    *SessionRecord
+	followTail       bool
+	collapseToolLogs bool
+	printedBlockKeys map[string]struct{}
+	pendingDelete    *SessionSummary
 
 	lastTextInputAt  time.Time
 	likelyPasteBurst bool
@@ -168,7 +198,7 @@ func New(rootDir string) (Model, error) {
 	sessionList.SetFilteringEnabled(true)
 
 	input := textarea.New()
-	input.Placeholder = "输入消息，Enter 发送，Ctrl+V/Insert 粘贴，Ctrl+Y/F5 复制会话，Ctrl+L 返回会话列表"
+	input.Placeholder = "输入消息，Enter 发送，Ctrl+V/Insert 粘贴，Ctrl+O 折叠日志，Ctrl+Y/F5 复制，Ctrl+L 会话列表"
 	input.Prompt = "│ "
 	input.ShowLineNumbers = false
 	input.SetHeight(4)
@@ -177,15 +207,17 @@ func New(rootDir string) (Model, error) {
 	vp := viewport.New(40, 12)
 
 	return Model{
-		rootDir:    rootDir,
-		backend:    backend,
-		events:     backend.Events(),
-		mode:       modeLoading,
-		spinner:    spin,
-		list:       sessionList,
-		viewport:   vp,
-		input:      input,
-		followTail: true,
+		rootDir:          rootDir,
+		backend:          backend,
+		events:           backend.Events(),
+		mode:             modeLoading,
+		spinner:          spin,
+		list:             sessionList,
+		viewport:         vp,
+		input:            input,
+		followTail:       true,
+		collapseToolLogs: true,
+		printedBlockKeys: map[string]struct{}{},
 	}, nil
 }
 
@@ -218,8 +250,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lastErr = "后端已退出"
 		return m, tea.Quit
 	case backendEventMsg:
-		m.applyEvent(msg.event)
-		return m, waitBackendEvent(m.events)
+		cmd := m.applyEvent(msg.event)
+		return m, tea.Batch(cmd, waitBackendEvent(m.events))
 	case tea.MouseMsg:
 		if m.mode == modeChat {
 			return m.updateChatMouse(msg)
@@ -250,38 +282,39 @@ func (m Model) View() string {
 
 	switch m.mode {
 	case modeLoading:
-		body := panelStyle.Width(maxInt(40, m.width-8)).Render(
-			headerStyle.Render("周行") + "\n" +
-				subtleStyle.Render("连接 Python backend 与会话存储...") + "\n\n" +
-				m.spinner.View() + " " + subtleStyle.Render("等待后端就绪"),
-		)
-		return pageStyle.Render(body)
+		return strings.Join([]string{
+			"周行",
+			m.spinner.View() + " 连接 Python backend 与会话存储...",
+		}, "\n")
 	case modeSessionPicker:
-		titleLines := []string{
-			headerStyle.Render("周行"),
-			subtleStyle.Render("载入历史会话或新建会话"),
-		}
-		if m.lastErr != "" {
-			titleLines = append(titleLines, subtleStyle.Render("错误: "+m.lastErr))
-		}
-		title := strings.Join(titleLines, "\n")
-		panelWidth := maxInt(48, m.width-8)
-		panelInnerWidth := maxInt(32, panelWidth-4)
-		contentHeight := maxInt(10, m.height-14)
-		content := m.list.View()
-		if m.pendingDelete != nil {
-			content = lipgloss.Place(panelInnerWidth, contentHeight, lipgloss.Center, lipgloss.Center, m.renderDeleteConfirmDialog(panelInnerWidth))
-		}
-		help := m.renderSessionPickerHelp()
-		body := panelStyle.Width(panelWidth).Render(title + "\n\n" + content + "\n" + help)
-		return pageStyle.Render(body)
+		return m.renderSessionPickerView()
 	default:
-		header := m.renderHeader()
-		transcript := panelStyle.Height(maxInt(8, m.viewport.Height)).Render(m.viewport.View())
-		input := panelStyle.Render(m.input.View())
-		status := statusStyle.Width(maxInt(20, m.width-4)).Render(m.renderStatus())
-		return pageStyle.Render(lipgloss.JoinVertical(lipgloss.Left, header, transcript, input, status))
+		return m.renderChatView()
 	}
+}
+
+func (m Model) renderSessionPickerView() string {
+	lines := []string{
+		"周行 / 会话",
+		"载入历史会话或新建会话",
+	}
+	if m.lastErr != "" {
+		lines = append(lines, "错误: "+m.lastErr)
+	}
+	content := m.list.View()
+	if m.pendingDelete != nil {
+		content = m.renderDeleteConfirmDialog(maxInt(1, m.width))
+	}
+	lines = append(lines, "", content, "", m.renderSessionPickerHelp())
+	return strings.Join(lines, "\n")
+}
+
+func (m Model) renderChatView() string {
+	status := truncateToWidth(m.renderStatus(), maxInt(1, m.width))
+	return strings.Join([]string{
+		status,
+		m.input.View(),
+	}, "\n")
 }
 
 func (m Model) updateSessionPicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -366,6 +399,14 @@ func (m Model) updateChat(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.notice = "已复制当前会话到系统剪贴板"
 		return m, nil
+	case "ctrl+o":
+		m.collapseToolLogs = !m.collapseToolLogs
+		if m.collapseToolLogs {
+			m.notice = "工具日志已折叠"
+		} else {
+			m.notice = "工具日志已展开"
+		}
+		return m, nil
 	case "ctrl+up", "alt+up":
 		m.followTail = false
 		m.viewport.LineUp(1)
@@ -434,22 +475,24 @@ func (m Model) updateChatInput(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func (m *Model) applyEvent(event Event) {
+func (m *Model) applyEvent(event Event) tea.Cmd {
 	switch event.Type {
 	case "ready":
 		m.ready = event.Ready
 		if m.mode == modeLoading {
 			m.mode = modeSessionPicker
 		}
+		return nil
 	case "session_list":
 		m.sessions = event.Sessions
 		m.refreshSessionList()
 		if m.mode == modeLoading {
 			m.mode = modeSessionPicker
 		}
+		return nil
 	case "session_loaded":
 		if event.Session == nil {
-			return
+			return nil
 		}
 		sessionCopy := *event.Session
 		m.activeSession = &sessionCopy
@@ -457,16 +500,19 @@ func (m *Model) applyEvent(event Event) {
 		m.mode = modeChat
 		m.followTail = true
 		m.rebuildViewport(true)
+		return m.flushTranscriptPrintCmd(true)
 	case "message":
 		if event.Message == nil || m.activeSession == nil {
-			return
+			return nil
 		}
 		m.insertMessage(*event.Message, event.AfterMessageID)
 		m.rebuildViewport(false)
+		return m.flushTranscriptPrintCmd(false)
 	case "status":
 		if event.Status != nil {
 			m.status = *event.Status
 		}
+		return nil
 	case "progress":
 		if event.Progress != nil {
 			m.status.Phase = event.Progress.Phase
@@ -476,22 +522,15 @@ func (m *Model) applyEvent(event Event) {
 			m.status.OfflineMode = event.Progress.OfflineMode
 			m.status.Context = event.Progress.Context
 		}
+		return nil
 	case "tool_event":
 		if event.Tool == nil || m.activeSession == nil {
-			return
+			return nil
 		}
-		syntheticID := event.Tool.ID
-		if syntheticID == "" {
-			syntheticID = fmt.Sprintf("tool_event_%s_%s_%d", event.Tool.Tool, event.Tool.Phase, len(m.activeSession.Messages))
-		}
-		synthetic := ChatMessage{
-			ID:        syntheticID,
-			Role:      "event",
-			Content:   formatToolEvent(*event.Tool),
-			CreatedAt: "",
-		}
+		synthetic := makeSyntheticToolEventMessage(*event.Tool, len(m.activeSession.Messages))
 		m.insertMessage(synthetic, event.Tool.AfterMessageID)
 		m.rebuildViewport(false)
+		return m.flushTranscriptPrintCmd(false)
 	case "error":
 		m.lastErr = event.Error
 		if m.activeSession != nil {
@@ -502,9 +541,12 @@ func (m *Model) applyEvent(event Event) {
 			}, "")
 			m.rebuildViewport(false)
 		}
+		return m.flushTranscriptPrintCmd(false)
 	case "stderr":
 		m.lastErr = event.Stderr
+		return nil
 	}
+	return nil
 }
 
 func (m *Model) refreshSessionList() {
@@ -545,17 +587,25 @@ func (m *Model) updateLayout() {
 	if m.width <= 0 || m.height <= 0 {
 		return
 	}
-	contentWidth := maxInt(32, m.width-8)
-	headerHeight := 3
-	statusHeight := 1
-	inputHeight := 6
-	bodyHeight := maxInt(10, m.height-headerHeight-statusHeight-inputHeight-6)
 
-	m.list.SetSize(contentWidth, maxInt(10, m.height-8))
-	m.viewport.Width = contentWidth - 4
-	m.viewport.Height = bodyHeight
-	m.input.SetWidth(contentWidth - 4)
-	m.input.SetHeight(4)
+	listWidth := maxInt(1, m.width)
+	listHeight := maxInt(1, m.height-4)
+	m.list.SetSize(listWidth, listHeight)
+
+	inputHeight := defaultInputHeight
+	if m.height <= 2 {
+		inputHeight = 1
+	} else if m.height-1 < inputHeight {
+		inputHeight = m.height - 1
+	}
+	if inputHeight < 1 {
+		inputHeight = 1
+	}
+
+	m.viewport.Width = maxInt(1, m.width)
+	m.viewport.Height = maxInt(1, m.height-inputHeight-1)
+	m.input.SetWidth(maxInt(1, m.width))
+	m.input.SetHeight(inputHeight)
 	m.rebuildViewport(false)
 }
 
@@ -566,10 +616,7 @@ func (m *Model) rebuildViewport(forceBottom bool) {
 	}
 	atBottom := forceBottom || m.followTail || m.viewport.AtBottom()
 	offset := m.viewport.YOffset
-	blocks := make([]string, 0, len(m.activeSession.Messages))
-	for _, message := range m.activeSession.Messages {
-		blocks = append(blocks, renderChatMessage(message, m.viewport.Width))
-	}
+	blocks := renderTranscriptBlocks(m.activeSession.Messages, m.viewport.Width, m.collapseToolLogs)
 	m.viewport.SetContent(strings.Join(blocks, "\n\n"))
 	if atBottom {
 		m.viewport.GotoBottom()
@@ -580,7 +627,184 @@ func (m *Model) rebuildViewport(forceBottom bool) {
 	m.followTail = m.viewport.AtBottom()
 }
 
-func (m Model) renderHeader() string {
+type transcriptPrintBlock struct {
+	key  string
+	text string
+}
+
+func (m *Model) flushTranscriptPrintCmd(reset bool) tea.Cmd {
+	text := m.buildPendingTranscriptPrintText(reset)
+	if strings.TrimSpace(text) == "" {
+		return nil
+	}
+	return tea.Println(text)
+}
+
+func (m *Model) buildPendingTranscriptPrintText(reset bool) string {
+	if reset || m.printedBlockKeys == nil {
+		m.printedBlockKeys = map[string]struct{}{}
+	}
+	if m.activeSession == nil {
+		return ""
+	}
+
+	blocks := buildTranscriptPrintBlocks(m.activeSession.Messages, m.collapseToolLogs)
+	pending := make([]string, 0, len(blocks))
+	for _, block := range blocks {
+		if block.key == "" || strings.TrimSpace(block.text) == "" {
+			continue
+		}
+		if _, exists := m.printedBlockKeys[block.key]; exists {
+			continue
+		}
+		m.printedBlockKeys[block.key] = struct{}{}
+		pending = append(pending, block.text)
+	}
+	return strings.Join(pending, "\n\n")
+}
+
+func buildTranscriptPrintBlocks(messages []ChatMessage, collapseToolLogs bool) []transcriptPrintBlock {
+	blocks := make([]transcriptPrintBlock, 0, len(messages))
+	for index := 0; index < len(messages); {
+		message := messages[index]
+		if shouldHideChatMessage(message) {
+			index++
+			continue
+		}
+		if collapseToolLogs {
+			if group, next, ok := buildToolLogGroup(messages, index); ok {
+				if group.result != nil {
+					header, lines := summarizeToolLogGroup(group)
+					blocks = append(blocks, transcriptPrintBlock{
+						key:  group.result.ID,
+						text: renderTerminalLogBlock(header, lines),
+					})
+				}
+				index = next
+				continue
+			}
+			if block, ok := renderCollapsedStandalonePrintBlock(message); ok {
+				blocks = append(blocks, block)
+				index++
+				continue
+			}
+		}
+		blocks = append(blocks, transcriptPrintBlock{
+			key:  message.ID,
+			text: renderTerminalMessage(message),
+		})
+		index++
+	}
+	return blocks
+}
+
+func renderCollapsedStandalonePrintBlock(message ChatMessage) (transcriptPrintBlock, bool) {
+	if _, ok := messageToolEvent(message); ok {
+		return transcriptPrintBlock{}, false
+	}
+	if message.Role != "tool" && metaString(message.Meta, "source_tool") == "" {
+		return transcriptPrintBlock{}, false
+	}
+	header, lines := summarizeStandaloneToolMessage(message)
+	return transcriptPrintBlock{
+		key:  message.ID,
+		text: renderTerminalLogBlock(header, lines),
+	}, true
+}
+
+func renderTerminalMessage(message ChatMessage) string {
+	body := strings.TrimRight(message.Content, "\n")
+	if strings.TrimSpace(body) == "" {
+		body = "(empty)"
+	}
+	switch message.Role {
+	case "user":
+		return prefixBlock(body, "> ", "  ")
+	case "event":
+		return prefixBlock(body, "! ", "  ")
+	default:
+		return body
+	}
+}
+
+func renderTerminalLogBlock(header string, lines []string) string {
+	preview := foldedPreviewLines(lines)
+	if len(preview) == 0 {
+		return header
+	}
+	rendered := []string{header, "└ " + preview[0]}
+	for _, line := range preview[1:] {
+		rendered = append(rendered, "  "+line)
+	}
+	return strings.Join(rendered, "\n")
+}
+
+func prefixBlock(text string, firstPrefix string, restPrefix string) string {
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		if i == 0 {
+			lines[i] = firstPrefix + line
+			continue
+		}
+		lines[i] = restPrefix + line
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m Model) computePageLayout() pageLayout {
+	return pageLayout{
+		width:  maxInt(1, m.width-pageStyle.GetHorizontalFrameSize()),
+		height: maxInt(1, m.height-pageStyle.GetVerticalFrameSize()),
+	}
+}
+
+func (m Model) computeChatLayout() chatLayout {
+	page := m.computePageLayout()
+	panelFrameW := panelStyle.GetHorizontalFrameSize()
+	panelFrameH := panelStyle.GetVerticalFrameSize()
+
+	if page.width < panelFrameW+8 {
+		return chatLayout{pageWidth: page.width, pageHeight: page.height}
+	}
+
+	headerOuterHeight := 2 + panelFrameH
+	statusHeight := 1
+	minPanelOuterHeight := panelFrameH + 1
+	remainingHeight := page.height - headerOuterHeight - statusHeight
+	if remainingHeight < minPanelOuterHeight*2 {
+		return chatLayout{pageWidth: page.width, pageHeight: page.height}
+	}
+
+	desiredInputOuterHeight := panelFrameH + defaultInputHeight
+	inputOuterHeight := minInt(desiredInputOuterHeight, remainingHeight-minPanelOuterHeight)
+	if inputOuterHeight < minPanelOuterHeight {
+		inputOuterHeight = minPanelOuterHeight
+	}
+	transcriptOuterHeight := remainingHeight - inputOuterHeight
+	if transcriptOuterHeight < minPanelOuterHeight {
+		return chatLayout{pageWidth: page.width, pageHeight: page.height}
+	}
+
+	return chatLayout{
+		pageWidth:         page.width,
+		pageHeight:        page.height,
+		panelContentWidth: maxInt(1, page.width-panelFrameW),
+		transcriptHeight:  maxInt(1, transcriptOuterHeight-panelFrameH),
+		inputHeight:       maxInt(1, inputOuterHeight-panelFrameH),
+		valid:             true,
+	}
+}
+
+func (m Model) renderWindowTooSmall(page pageLayout) string {
+	panelContentWidth := contentWidthForStyle(page.width, panelStyle)
+	body := panelStyle.Width(panelContentWidth).Render(
+		headerStyle.Render(truncateToWidth("窗口过小", panelContentWidth)) + "\n" +
+			subtleStyle.Render(truncateToWidth(fmt.Sprintf("当前 %dx%d，请放大终端。", m.width, m.height), panelContentWidth)),
+	)
+	return pageStyle.Render(body)
+}
+
+func (m Model) renderHeader(width int) string {
 	title := "周行"
 	if m.activeSession != nil {
 		title = m.activeSession.Title
@@ -596,8 +820,9 @@ func (m Model) renderHeader() string {
 	if m.lastErr != "" {
 		meta = append(meta, "error "+m.lastErr)
 	}
-	return panelStyle.Width(maxInt(20, m.width-8)).Render(
-		headerStyle.Render(title) + "\n" + subtleStyle.Render(strings.Join(meta, "  |  ")),
+	return panelStyle.Width(maxInt(1, width)).Render(
+		headerStyle.Render(truncateToWidth(title, width)) + "\n" +
+			subtleStyle.Render(truncateToWidth(strings.Join(meta, "  |  "), width)),
 	)
 }
 
@@ -608,57 +833,750 @@ func (m Model) renderStatus() string {
 	} else if m.status.Phase != "" {
 		state = m.status.Phase
 	}
-	ctx := fmt.Sprintf("ctx %d/%d", m.status.Context.UsedTokens, m.status.Context.LimitTokens)
-	queue := fmt.Sprintf("queue %d", m.status.QueueLength)
-	help := "Enter 发送  Ctrl+V/Insert 粘贴  Ctrl+Y/F5 复制  PgUp/PgDn 滚动  Ctrl+L 会话"
-	parts := []string{state, m.status.Model, ctx, queue}
+	title := "周行"
+	if m.activeSession != nil && m.activeSession.Title != "" {
+		title = m.activeSession.Title
+	}
+	logState := "logs 展开"
+	if m.collapseToolLogs {
+		logState = "logs 折叠"
+	}
+	help := "Ctrl+Y/F5 复制  Ctrl+O 日志  Ctrl+L 会话"
+	parts := []string{title, state}
+	if m.status.Model != "" {
+		parts = append(parts, m.status.Model)
+	}
+	parts = append(parts, logState)
 	if m.notice != "" {
 		parts = append(parts, m.notice)
+	} else if m.lastErr != "" {
+		parts = append(parts, "错误: "+m.lastErr)
 	}
 	parts = append(parts, help)
 	return strings.Join(parts, "  |  ")
 }
 
 func (m Model) renderSessionPickerHelp() string {
-	parts := []string{
-		primaryKeyStyle.Render("Enter") + subtleStyle.Render(" 打开"),
-		subtleStyle.Render("←/→ 翻页"),
-		dangerKeyStyle.Render("Delete") + subtleStyle.Render(" 删除会话"),
-		subtleStyle.Render("/ 搜索"),
-		subtleStyle.Render("q 退出"),
-	}
-	return strings.Join(parts, "  ")
+	return "Enter 打开  ←/→ 翻页  Delete 删除会话  / 搜索  q 退出"
 }
 
 func (m Model) renderDeleteConfirmDialog(availableWidth int) string {
 	if m.pendingDelete == nil {
 		return ""
 	}
-	dialogWidth := minInt(64, maxInt(36, availableWidth-6))
-	body := strings.Join([]string{
-		confirmTitleStyle.Render("确认删除会话"),
-		headerStyle.Render(m.pendingDelete.Title),
-		subtleStyle.Render("删除后不可恢复。"),
-		"",
-		primaryKeyStyle.Render("Enter") + subtleStyle.Render(" 确认删除    ") + subtleStyle.Render("Esc 取消"),
+	_ = availableWidth
+	return strings.Join([]string{
+		"确认删除会话",
+		m.pendingDelete.Title,
+		"删除后不可恢复。",
+		"Enter 确认删除    Esc 取消",
 	}, "\n")
-	return confirmPanelStyle.Width(dialogWidth).Render(body)
 }
 
 func renderChatMessage(message ChatMessage, width int) string {
 	label := chatMessageLabel(message)
-
-	body := styleMessageBody(message.Content, maxInt(20, width-2))
-	text := headerStyle.Render(label) + "\n" + body
 	switch message.Role {
 	case "user":
-		return userBlockStyle.Width(width).Render(text)
+		return renderFramedMessage(userBlockStyle, label, message.Content, width)
 	case "assistant":
-		return assistantBlockStyle.Width(width).Render(text)
+		return renderFramedMessage(assistantBlockStyle, label, message.Content, width)
 	case "tool":
-		return toolBlockStyle.Width(width).Render(text)
+		return renderFramedMessage(toolBlockStyle, label, message.Content, width)
 	default:
-		return eventBlockStyle.Width(width).Render(text)
+		return renderFramedMessage(eventBlockStyle, label, message.Content, width)
+	}
+}
+
+func renderFramedMessage(style lipgloss.Style, label string, content string, outerWidth int) string {
+	contentWidth := contentWidthForStyle(outerWidth, style)
+	body := styleMessageBody(content, contentWidth)
+	text := headerStyle.Render(truncateToWidth(label, contentWidth)) + "\n" + body
+	return style.Width(contentWidth).Render(text)
+}
+
+type toolLogGroup struct {
+	call    ToolEvent
+	hasCall bool
+	events  []ToolEvent
+	result  *ChatMessage
+}
+
+type runCommandSummary struct {
+	Command    string
+	CWD        string
+	ExitCode   string
+	Duration   string
+	TimedOut   string
+	Resources  string
+	StdoutTail []string
+	StderrTail []string
+}
+
+func makeSyntheticToolEventMessage(event ToolEvent, messageCount int) ChatMessage {
+	syntheticID := event.ID
+	if syntheticID == "" {
+		syntheticID = fmt.Sprintf("tool_event_%s_%s_%d", event.Tool, event.Phase, messageCount)
+	}
+	return ChatMessage{
+		ID:        syntheticID,
+		Role:      "event",
+		Content:   formatToolEvent(event),
+		CreatedAt: "",
+		Meta: map[string]any{
+			"synthetic_tool_event": true,
+			"tool_name":            event.Tool,
+			"tool_phase":           event.Phase,
+			"tool_command":         event.Command,
+			"tool_cwd":             event.CWD,
+			"tool_summary":         event.Summary,
+			"tool_text":            event.Text,
+			"tool_channel":         event.Channel,
+			"tool_after_sec":       event.AfterSec,
+			"tool_exit_code":       event.ExitCode,
+			"tool_duration_sec":    event.DurationSec,
+			"tool_timeout_sec":     event.TimeoutSec,
+			"tool_timed_out":       event.TimedOut,
+			"tool_arguments":       event.Arguments,
+		},
+	}
+}
+
+func renderTranscriptBlocks(messages []ChatMessage, width int, collapseToolLogs bool) []string {
+	blocks := make([]string, 0, len(messages))
+	for index := 0; index < len(messages); {
+		message := messages[index]
+		if shouldHideChatMessage(message) {
+			index++
+			continue
+		}
+		if collapseToolLogs {
+			if group, next, ok := buildToolLogGroup(messages, index); ok {
+				blocks = append(blocks, renderToolLogGroup(group, width))
+				index = next
+				continue
+			}
+			if block, ok := renderCollapsedStandaloneMessage(message, width); ok {
+				blocks = append(blocks, block)
+				index++
+				continue
+			}
+		}
+		blocks = append(blocks, renderChatMessage(message, width))
+		index++
+	}
+	return blocks
+}
+
+func shouldHideChatMessage(message ChatMessage) bool {
+	if message.Role != "assistant" || strings.TrimSpace(message.Content) != "" {
+		return false
+	}
+	_, hasToolCalls := message.Meta["tool_calls"]
+	return hasToolCalls
+}
+
+func buildToolLogGroup(messages []ChatMessage, start int) (toolLogGroup, int, bool) {
+	callEvent, ok := messageToolEvent(messages[start])
+	if !ok || callEvent.Phase != "call" {
+		return toolLogGroup{}, start, false
+	}
+	group := toolLogGroup{
+		call:    callEvent,
+		hasCall: true,
+		events:  []ToolEvent{callEvent},
+	}
+	index := start + 1
+	for index < len(messages) {
+		if shouldHideChatMessage(messages[index]) {
+			index++
+			continue
+		}
+		event, ok := messageToolEvent(messages[index])
+		if ok {
+			if event.Phase == "call" {
+				break
+			}
+			group.events = append(group.events, event)
+			index++
+			continue
+		}
+		if messages[index].Role == "tool" {
+			result := messages[index]
+			group.result = &result
+			index++
+		}
+		break
+	}
+	return group, index, true
+}
+
+func renderCollapsedStandaloneMessage(message ChatMessage, width int) (string, bool) {
+	if event, ok := messageToolEvent(message); ok {
+		if event.Phase == "call" {
+			return "", false
+		}
+		group := toolLogGroup{
+			call:   event,
+			events: []ToolEvent{event},
+		}
+		return renderToolLogGroup(group, width), true
+	}
+	if message.Role != "tool" && metaString(message.Meta, "source_tool") == "" {
+		return "", false
+	}
+	header, lines := summarizeStandaloneToolMessage(message)
+	style := toolBlockStyle
+	if message.Role == "event" {
+		style = eventBlockStyle
+	}
+	return renderCollapsedLogBlock(header, lines, width, style), true
+}
+
+func renderToolLogGroup(group toolLogGroup, width int) string {
+	header, lines := summarizeToolLogGroup(group)
+	return renderCollapsedLogBlock(header, lines, width, eventBlockStyle)
+}
+
+func renderCollapsedLogBlock(header string, lines []string, width int, blockStyle lipgloss.Style) string {
+	innerWidth := contentWidthForStyle(width, blockStyle)
+	preview := foldedPreviewLines(lines)
+	rendered := []string{logHeaderStyle.Width(innerWidth).Render(header)}
+	if len(preview) > 0 {
+		rendered = append(rendered, logLineStyle.Width(innerWidth).Render("└ "+preview[0]))
+		for _, line := range preview[1:] {
+			style := logLineStyle
+			if strings.HasPrefix(line, "… +") {
+				style = logOmittedStyle
+			}
+			rendered = append(rendered, style.Width(innerWidth).Render("  "+line))
+		}
+	}
+	return blockStyle.Width(innerWidth).Render(strings.Join(rendered, "\n"))
+}
+
+func summarizeToolLogGroup(group toolLogGroup) (string, []string) {
+	toolName := group.call.Tool
+	if toolName == "" && group.result != nil {
+		toolName = toolNameForMessage(*group.result)
+	}
+	if toolName == "run_command" {
+		return summarizeRunCommandGroup(group)
+	}
+
+	header := summarizeToolCallHeader(toolName, group.call.Arguments)
+	lines := []string{}
+	if group.result != nil {
+		resultHeader, resultLines := summarizeToolPayload(toolName, group.result.Content, nil)
+		if header == "" {
+			header = resultHeader
+		}
+		lines = append(lines, resultLines...)
+	}
+	if header == "" && toolName != "" {
+		header = "• " + strings.ReplaceAll(toolName, "_", " ")
+	}
+	if header == "" {
+		header = "• Tool output"
+	}
+	if len(lines) == 0 {
+		lines = append(lines, "(no output)")
+	}
+	return header, lines
+}
+
+func summarizeStandaloneToolMessage(message ChatMessage) (string, []string) {
+	toolName := toolNameForMessage(message)
+	header, lines := summarizeToolPayload(toolName, message.Content, nil)
+	if header == "" {
+		header = summarizeToolCallHeader(toolName, nil)
+	}
+	if header == "" {
+		header = "• Tool output"
+	}
+	if len(lines) == 0 {
+		lines = append(lines, "(no output)")
+	}
+	return header, lines
+}
+
+func summarizeToolPayload(toolName string, content string, args map[string]any) (string, []string) {
+	intro, payload := stripToolIntro(toolName, content)
+	if toolName == "run_command" {
+		summary := parseRunCommandSummary(payload)
+		header := summarizeToolCallHeader(toolName, args)
+		if header == "" && summary.Command != "" {
+			header = summarizeToolCallHeader(toolName, map[string]any{"command": summary.Command})
+		}
+		lines := runCommandBodyLines(summary)
+		if intro != "" {
+			lines = append([]string{intro}, lines...)
+		}
+		return header, lines
+	}
+
+	header := ""
+	if args != nil {
+		header = summarizeToolCallHeader(toolName, args)
+	}
+	if header == "" {
+		header = summarizeToolResultHeader(toolName, payload)
+	}
+	if header == "" {
+		header = summarizeToolCallHeader(toolName, nil)
+	}
+	lines := summarizeToolResultLines(toolName, payload)
+	if intro != "" {
+		lines = append([]string{intro}, lines...)
+	}
+	return header, lines
+}
+
+func summarizeRunCommandGroup(group toolLogGroup) (string, []string) {
+	header := summarizeToolCallHeader("run_command", group.call.Arguments)
+	if header == "" && group.call.Command != "" {
+		header = summarizeToolCallHeader("run_command", map[string]any{"command": group.call.Command})
+	}
+
+	var (
+		cwd          string
+		heartbeat    string
+		timeoutLine  string
+		finishLine   string
+		outputLines  []string
+		truncatedOut bool
+	)
+
+	for _, event := range group.events {
+		switch event.Phase {
+		case "start":
+			if cwd == "" {
+				cwd = event.CWD
+			}
+			if header == "" && event.Command != "" {
+				header = summarizeToolCallHeader("run_command", map[string]any{"command": event.Command})
+			}
+		case "output":
+			if line := formatToolOutputLine(event.Channel, event.Text); line != "" {
+				outputLines = append(outputLines, line)
+			}
+		case "output_truncated":
+			truncatedOut = true
+		case "heartbeat":
+			heartbeat = fmt.Sprintf("running %ds | %s", event.AfterSec, event.Summary)
+		case "timeout":
+			timeoutLine = fmt.Sprintf("timeout after %ds", event.TimeoutSec)
+		case "finish":
+			finishLine = formatToolStatusLine(event)
+		}
+	}
+
+	lines := []string{}
+	if cwd != "" {
+		lines = append(lines, "cwd: "+cwd)
+	}
+	lines = append(lines, outputLines...)
+	if truncatedOut {
+		lines = append(lines, "UI 已截断持续输出，后台仍保留尾部摘要")
+	}
+	if timeoutLine != "" {
+		lines = append(lines, timeoutLine)
+	}
+	if finishLine != "" {
+		lines = append(lines, finishLine)
+	} else if heartbeat != "" {
+		lines = append(lines, heartbeat)
+	}
+
+	if len(lines) == 0 && group.result != nil {
+		resultHeader, resultLines := summarizeToolPayload("run_command", group.result.Content, nil)
+		if header == "" {
+			header = resultHeader
+		}
+		lines = append(lines, resultLines...)
+	}
+	if header == "" {
+		header = "• Ran command"
+	}
+	if len(lines) == 0 {
+		lines = append(lines, "(no output)")
+	}
+	return header, lines
+}
+
+func summarizeToolCallHeader(toolName string, args map[string]any) string {
+	switch toolName {
+	case "run_command":
+		command := stringFromAny(args["command"])
+		if command == "" {
+			return ""
+		}
+		return "• Ran " + command
+	case "read_file":
+		path := stringFromAny(args["path"])
+		startLine := intFromAny(args["start_line"])
+		endLine := intFromAny(args["end_line"])
+		switch {
+		case path == "":
+			return "• Read file"
+		case startLine > 0 && endLine >= startLine:
+			return fmt.Sprintf("• Read %s (lines %d-%d)", path, startLine, endLine)
+		case startLine > 0:
+			return fmt.Sprintf("• Read %s (from line %d)", path, startLine)
+		default:
+			return "• Read " + path
+		}
+	case "list_directory":
+		path := stringFromAny(args["path"])
+		if path == "" {
+			path = "."
+		}
+		if boolFromAny(args["recursive"]) {
+			return "• Listed " + path + " recursively"
+		}
+		return "• Listed " + path
+	case "search_text":
+		pattern := stringFromAny(args["pattern"])
+		path := stringFromAny(args["path"])
+		switch {
+		case pattern != "" && path != "":
+			return fmt.Sprintf("• Searched %q in %s", pattern, path)
+		case pattern != "":
+			return fmt.Sprintf("• Searched %q", pattern)
+		default:
+			return "• Search results"
+		}
+	case "write_file":
+		path := stringFromAny(args["path"])
+		if path == "" {
+			return "• Wrote file"
+		}
+		return "• Wrote " + path
+	case "insert_text":
+		path := stringFromAny(args["path"])
+		if path == "" {
+			return "• Inserted text"
+		}
+		return "• Inserted text into " + path
+	case "replace_in_file":
+		path := stringFromAny(args["path"])
+		if path == "" {
+			return "• Replaced text"
+		}
+		return "• Replaced text in " + path
+	default:
+		if toolName == "" {
+			return ""
+		}
+		return "• " + strings.ReplaceAll(toolName, "_", " ")
+	}
+}
+
+func summarizeToolResultHeader(toolName string, content string) string {
+	lines := splitContentLines(content)
+	if len(lines) == 0 {
+		return summarizeToolCallHeader(toolName, nil)
+	}
+	first := lines[0]
+	switch {
+	case toolName == "read_file" && strings.HasPrefix(first, "File "):
+		return "• Read " + strings.TrimSuffix(strings.TrimPrefix(first, "File "), ":")
+	case toolName == "list_directory" && strings.HasPrefix(first, "Listing for "):
+		return "• Listed " + strings.TrimSuffix(strings.TrimPrefix(first, "Listing for "), ":")
+	case toolName == "search_text" && strings.HasPrefix(first, "Search hits:"):
+		return "• Search results"
+	case toolName == "run_command" && strings.HasPrefix(first, "command="):
+		return "• Ran " + strings.TrimPrefix(first, "command=")
+	default:
+		return summarizeToolCallHeader(toolName, nil)
+	}
+}
+
+func summarizeToolResultLines(toolName string, content string) []string {
+	lines := splitContentLines(content)
+	if len(lines) == 0 {
+		return nil
+	}
+	switch toolName {
+	case "read_file", "list_directory", "search_text":
+		if len(lines) > 1 {
+			return lines[1:]
+		}
+	case "write_file", "insert_text", "replace_in_file":
+		return lines
+	}
+	return lines
+}
+
+func stripToolIntro(toolName string, content string) (string, string) {
+	payload := strings.TrimRight(content, "\n")
+	markers := toolPayloadMarkers(toolName)
+	if len(markers) == 0 {
+		return "", payload
+	}
+	for _, marker := range markers {
+		if strings.HasPrefix(payload, marker) {
+			return "", payload
+		}
+		if index := strings.Index(payload, "\n"+marker); index >= 0 {
+			intro := strings.TrimSpace(payload[:index])
+			return intro, payload[index+1:]
+		}
+	}
+	return "", payload
+}
+
+func toolPayloadMarkers(toolName string) []string {
+	switch toolName {
+	case "run_command":
+		return []string{"command="}
+	case "read_file":
+		return []string{"File "}
+	case "list_directory":
+		return []string{"Listing for "}
+	case "search_text":
+		return []string{"Search hits:"}
+	case "write_file":
+		return []string{"wrote ", "appended to "}
+	case "insert_text":
+		return []string{"inserted text into "}
+	case "replace_in_file":
+		return []string{"replaced "}
+	default:
+		return nil
+	}
+}
+
+func parseRunCommandSummary(content string) runCommandSummary {
+	lines := splitContentLines(content)
+	summary := runCommandSummary{}
+	section := ""
+	for _, line := range lines {
+		switch {
+		case line == "stdout_tail:":
+			section = "stdout"
+		case line == "stderr_tail:":
+			section = "stderr"
+		case strings.HasPrefix(line, "command="):
+			summary.Command = strings.TrimPrefix(line, "command=")
+			section = ""
+		case strings.HasPrefix(line, "cwd="):
+			summary.CWD = strings.TrimPrefix(line, "cwd=")
+			section = ""
+		case strings.HasPrefix(line, "exit_code="):
+			summary.ExitCode = strings.TrimPrefix(line, "exit_code=")
+			section = ""
+		case strings.HasPrefix(line, "duration_sec="):
+			summary.Duration = strings.TrimPrefix(line, "duration_sec=")
+			section = ""
+		case strings.HasPrefix(line, "timed_out="):
+			summary.TimedOut = strings.TrimPrefix(line, "timed_out=")
+			section = ""
+		case strings.HasPrefix(line, "resources="):
+			summary.Resources = strings.TrimPrefix(line, "resources=")
+			section = ""
+		default:
+			switch section {
+			case "stdout":
+				summary.StdoutTail = append(summary.StdoutTail, line)
+			case "stderr":
+				summary.StderrTail = append(summary.StderrTail, line)
+			}
+		}
+	}
+	return summary
+}
+
+func runCommandBodyLines(summary runCommandSummary) []string {
+	lines := []string{}
+	if summary.CWD != "" {
+		lines = append(lines, "cwd: "+summary.CWD)
+	}
+	for _, line := range summary.StdoutTail {
+		if trimmed := strings.TrimSpace(line); trimmed != "" && trimmed != "(empty)" {
+			lines = append(lines, line)
+		}
+	}
+	for _, line := range summary.StderrTail {
+		if trimmed := strings.TrimSpace(line); trimmed != "" && trimmed != "(empty)" {
+			lines = append(lines, formatToolOutputLine("stderr", line))
+		}
+	}
+	status := []string{}
+	if summary.ExitCode != "" {
+		status = append(status, "exit="+summary.ExitCode)
+	}
+	if summary.Duration != "" {
+		status = append(status, "duration="+summary.Duration+"s")
+	}
+	if summary.TimedOut != "" && summary.TimedOut != "false" && summary.TimedOut != "False" {
+		status = append(status, "timed_out="+summary.TimedOut)
+	}
+	if summary.Resources != "" {
+		status = append(status, summary.Resources)
+	}
+	if len(status) > 0 {
+		lines = append(lines, strings.Join(status, " | "))
+	}
+	return lines
+}
+
+func formatToolOutputLine(channel string, text string) string {
+	if strings.TrimSpace(text) == "" {
+		return ""
+	}
+	if channel == "stderr" {
+		return "stderr | " + text
+	}
+	return text
+}
+
+func formatToolStatusLine(event ToolEvent) string {
+	parts := []string{fmt.Sprintf("exit=%d", event.ExitCode)}
+	if event.DurationSec > 0 {
+		parts = append(parts, fmt.Sprintf("duration=%.2fs", event.DurationSec))
+	}
+	if event.TimedOut {
+		parts = append(parts, "timed_out=true")
+	}
+	if event.Summary != "" {
+		parts = append(parts, event.Summary)
+	}
+	return strings.Join(parts, " | ")
+}
+
+func foldedPreviewLines(lines []string) []string {
+	trimmed := trimEmptyEdges(lines)
+	if len(trimmed) <= foldedPreviewHeadLines+foldedPreviewTailLines {
+		return trimmed
+	}
+	hidden := len(trimmed) - foldedPreviewHeadLines - foldedPreviewTailLines
+	preview := append([]string{}, trimmed[:foldedPreviewHeadLines]...)
+	preview = append(preview, fmt.Sprintf("… +%d lines", hidden))
+	preview = append(preview, trimmed[len(trimmed)-foldedPreviewTailLines:]...)
+	return preview
+}
+
+func trimEmptyEdges(lines []string) []string {
+	start := 0
+	end := len(lines)
+	for start < end && strings.TrimSpace(lines[start]) == "" {
+		start++
+	}
+	for end > start && strings.TrimSpace(lines[end-1]) == "" {
+		end--
+	}
+	return lines[start:end]
+}
+
+func splitContentLines(content string) []string {
+	content = strings.TrimRight(content, "\n")
+	if strings.TrimSpace(content) == "" {
+		return nil
+	}
+	return strings.Split(content, "\n")
+}
+
+func messageToolEvent(message ChatMessage) (ToolEvent, bool) {
+	if message.Role != "event" || !metaBool(message.Meta, "synthetic_tool_event") {
+		return ToolEvent{}, false
+	}
+	return ToolEvent{
+		ID:          message.ID,
+		Tool:        metaString(message.Meta, "tool_name"),
+		Phase:       metaString(message.Meta, "tool_phase"),
+		Command:     metaString(message.Meta, "tool_command"),
+		CWD:         metaString(message.Meta, "tool_cwd"),
+		Summary:     metaString(message.Meta, "tool_summary"),
+		Text:        metaString(message.Meta, "tool_text"),
+		Channel:     metaString(message.Meta, "tool_channel"),
+		AfterSec:    metaInt(message.Meta, "tool_after_sec"),
+		ExitCode:    metaInt(message.Meta, "tool_exit_code"),
+		DurationSec: metaFloat(message.Meta, "tool_duration_sec"),
+		TimeoutSec:  metaInt(message.Meta, "tool_timeout_sec"),
+		TimedOut:    metaBool(message.Meta, "tool_timed_out"),
+		Arguments:   metaMap(message.Meta, "tool_arguments"),
+	}, true
+}
+
+func toolNameForMessage(message ChatMessage) string {
+	if message.Name != "" {
+		return message.Name
+	}
+	return metaString(message.Meta, "source_tool")
+}
+
+func metaString(meta map[string]any, key string) string {
+	return stringFromAny(meta[key])
+}
+
+func metaInt(meta map[string]any, key string) int {
+	return intFromAny(meta[key])
+}
+
+func metaFloat(meta map[string]any, key string) float64 {
+	switch value := meta[key].(type) {
+	case float64:
+		return value
+	case float32:
+		return float64(value)
+	case int:
+		return float64(value)
+	case int64:
+		return float64(value)
+	default:
+		return 0
+	}
+}
+
+func metaBool(meta map[string]any, key string) bool {
+	return boolFromAny(meta[key])
+}
+
+func metaMap(meta map[string]any, key string) map[string]any {
+	value, ok := meta[key]
+	if !ok {
+		return nil
+	}
+	switch typed := value.(type) {
+	case map[string]any:
+		return typed
+	default:
+		return nil
+	}
+}
+
+func stringFromAny(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return typed
+	default:
+		return ""
+	}
+}
+
+func intFromAny(value any) int {
+	switch typed := value.(type) {
+	case int:
+		return typed
+	case int32:
+		return int(typed)
+	case int64:
+		return int(typed)
+	case float64:
+		return int(typed)
+	case float32:
+		return int(typed)
+	default:
+		return 0
+	}
+}
+
+func boolFromAny(value any) bool {
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	default:
+		return false
 	}
 }
 
@@ -808,6 +1726,17 @@ func formatToolEvent(event ToolEvent) string {
 	default:
 		return fmt.Sprintf("%s: %s", event.Phase, event.Summary)
 	}
+}
+
+func contentWidthForStyle(outerWidth int, style lipgloss.Style) int {
+	return maxInt(1, outerWidth-style.GetHorizontalFrameSize())
+}
+
+func truncateToWidth(text string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	return ansi.Cut(text, 0, width)
 }
 
 func maxInt(a, b int) int {

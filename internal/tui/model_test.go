@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -247,6 +248,11 @@ func TestCopyTranscriptShortcutReportsClipboardError(t *testing.T) {
 
 func TestRenderStatusShowsCopyHint(t *testing.T) {
 	m := Model{
+		collapseToolLogs: true,
+		activeSession: &SessionRecord{
+			ID:    "session_status",
+			Title: "状态测试",
+		},
 		status: StatusPayload{
 			Model: "deepseek",
 			Context: ContextUsage{
@@ -257,10 +263,270 @@ func TestRenderStatusShowsCopyHint(t *testing.T) {
 	}
 
 	status := m.renderStatus()
-	for _, want := range []string{"Ctrl+V/Insert 粘贴", "Ctrl+Y/F5 复制"} {
+	for _, want := range []string{"状态测试", "Ctrl+Y/F5 复制", "Ctrl+O 日志", "logs 折叠"} {
 		if !contains(status, want) {
 			t.Fatalf("status missing hint %q: %s", want, status)
 		}
+	}
+}
+
+func TestCollapsedRunCommandLogGroupsStreamingOutput(t *testing.T) {
+	m := Model{
+		viewport:         viewport.New(80, 20),
+		collapseToolLogs: true,
+		activeSession: &SessionRecord{
+			ID: "session_logs",
+			Messages: []ChatMessage{
+				makeSyntheticToolEventMessage(ToolEvent{
+					ID:    "tool_call",
+					Tool:  "run_command",
+					Phase: "call",
+					Arguments: map[string]any{
+						"command": "go test ./...",
+					},
+				}, 0),
+				makeSyntheticToolEventMessage(ToolEvent{
+					ID:      "tool_start",
+					Tool:    "run_command",
+					Phase:   "start",
+					Command: "go test ./...",
+					CWD:     "D:\\Auto\\research\\Astronomy\\ZhouXing",
+				}, 1),
+				makeSyntheticToolEventMessage(ToolEvent{
+					ID:      "tool_out_1",
+					Tool:    "run_command",
+					Phase:   "output",
+					Channel: "stdout",
+					Text:    "stdout one",
+				}, 2),
+				makeSyntheticToolEventMessage(ToolEvent{
+					ID:      "tool_out_2",
+					Tool:    "run_command",
+					Phase:   "output",
+					Channel: "stdout",
+					Text:    "stdout two",
+				}, 3),
+				makeSyntheticToolEventMessage(ToolEvent{
+					ID:      "tool_out_3",
+					Tool:    "run_command",
+					Phase:   "output",
+					Channel: "stdout",
+					Text:    "stdout three",
+				}, 4),
+				makeSyntheticToolEventMessage(ToolEvent{
+					ID:      "tool_out_4",
+					Tool:    "run_command",
+					Phase:   "output",
+					Channel: "stdout",
+					Text:    "stdout four",
+				}, 5),
+				makeSyntheticToolEventMessage(ToolEvent{
+					ID:          "tool_finish",
+					Tool:        "run_command",
+					Phase:       "finish",
+					ExitCode:    0,
+					DurationSec: 1.25,
+					Summary:     "cpu 12%",
+				}, 6),
+				{
+					ID:      "tool_result",
+					Role:    "tool",
+					Name:    "run_command",
+					Content: "command=go test ./...\nstdout_tail:\nstdout one\nstderr_tail:\n(empty)",
+				},
+			},
+		},
+	}
+
+	m.rebuildViewport(true)
+	view := ansi.Strip(m.viewport.View())
+
+	for _, want := range []string{"• Ran go test ./...", "stdout one", "stdout four", "exit=0 | duration=1.25s | cpu 12%", "… +2 lines"} {
+		if !contains(view, want) {
+			t.Fatalf("collapsed run command log missing %q: %s", want, view)
+		}
+	}
+	for _, hidden := range []string{"stdout two", "stdout three"} {
+		if contains(view, hidden) {
+			t.Fatalf("expected collapsed run command log to hide %q: %s", hidden, view)
+		}
+	}
+}
+
+func TestCollapsedStandaloneReadFileToolMessage(t *testing.T) {
+	m := Model{
+		viewport:         viewport.New(80, 20),
+		collapseToolLogs: true,
+		activeSession: &SessionRecord{
+			ID: "session_read",
+			Messages: []ChatMessage{
+				{
+					ID:   "tool_read",
+					Role: "tool",
+					Name: "read_file",
+					Content: strings.Join([]string{
+						"File D:\\Auto\\research\\Astronomy\\ZhouXing\\internal\\tui\\model.go lines 1-6:",
+						"   1: package tui",
+						"   2: import (",
+						"   3: \"fmt\"",
+						"   4: \"strings\"",
+						"   5: \"time\"",
+						"   6: )",
+					}, "\n"),
+				},
+			},
+		},
+	}
+
+	m.rebuildViewport(true)
+	view := ansi.Strip(m.viewport.View())
+
+	for _, want := range []string{
+		"• Read D:\\Auto\\research\\Astronomy\\ZhouXing\\internal\\tui\\model.go lines 1-6",
+		"   1: package tui",
+		"   2: import (",
+		"   5: \"time\"",
+		"   6: )",
+		"… +2 lines",
+	} {
+		if !contains(view, want) {
+			t.Fatalf("collapsed read_file log missing %q: %s", want, view)
+		}
+	}
+	for _, hidden := range []string{"   3: \"fmt\"", "   4: \"strings\""} {
+		if contains(view, hidden) {
+			t.Fatalf("expected collapsed read_file log to hide %q: %s", hidden, view)
+		}
+	}
+}
+
+func TestCtrlOTogglesToolLogCollapse(t *testing.T) {
+	m := Model{
+		mode:             modeChat,
+		viewport:         viewport.New(80, 20),
+		collapseToolLogs: true,
+	}
+
+	updatedModel, _ := m.updateChat(tea.KeyMsg{Type: tea.KeyCtrlO})
+	updated := updatedModel.(Model)
+
+	if updated.collapseToolLogs {
+		t.Fatalf("expected ctrl+o to expand tool logs")
+	}
+	if updated.notice != "工具日志已展开" {
+		t.Fatalf("unexpected notice after ctrl+o: %q", updated.notice)
+	}
+}
+
+func TestChatViewFitsWindowAfterResize(t *testing.T) {
+	m := newChatModelForLayoutTest()
+
+	for _, size := range []struct {
+		width  int
+		height int
+	}{
+		{width: 100, height: 30},
+		{width: 72, height: 20},
+		{width: 48, height: 14},
+	} {
+		m.width = size.width
+		m.height = size.height
+		m.updateLayout()
+
+		view := ansi.Strip(m.View())
+		if got := lipgloss.Height(view); got > size.height {
+			t.Fatalf("view height overflow after resize %dx%d: got %d lines\n%s", size.width, size.height, got, view)
+		}
+		if got := lipgloss.Width(view); got > size.width {
+			t.Fatalf("view width overflow after resize %dx%d: got %d cols\n%s", size.width, size.height, got, view)
+		}
+		for _, unwanted := range []string{"╭", "╰"} {
+			if contains(view, unwanted) {
+				t.Fatalf("chat view should not contain panel border %q after resize %dx%d: %s", unwanted, size.width, size.height, view)
+			}
+		}
+	}
+}
+
+func TestChatViewShowsBottomInputOnly(t *testing.T) {
+	m := newChatModelForLayoutTest()
+	m.width = 80
+	m.height = 20
+	m.updateLayout()
+
+	view := ansi.Strip(m.View())
+	for _, want := range []string{"布局测试", "Ctrl+Y/F5 复制", "输入消息"} {
+		if !contains(view, want) {
+			t.Fatalf("chat view missing %q: %s", want, view)
+		}
+	}
+	for _, unwanted := range []string{"请帮我检查日志折叠", "╭", "╰"} {
+		if contains(view, unwanted) {
+			t.Fatalf("chat view should not render transcript area or panel border %q: %s", unwanted, view)
+		}
+	}
+}
+
+func TestBuildPendingTranscriptPrintTextPrintsCollapsedTranscript(t *testing.T) {
+	m := Model{
+		collapseToolLogs: true,
+		activeSession: &SessionRecord{
+			ID:    "session_print",
+			Title: "打印测试",
+			Messages: []ChatMessage{
+				{ID: "user_1", Role: "user", Content: "请读取配置"},
+				{
+					ID:   "tool_read",
+					Role: "tool",
+					Name: "read_file",
+					Content: strings.Join([]string{
+						"File D:\\Auto\\research\\Astronomy\\ZhouXing\\README.md lines 1-5:",
+						"   1: # 周行",
+						"   2: ",
+						"   3: 说明",
+						"   4: 更多说明",
+						"   5: 结束",
+					}, "\n"),
+				},
+				{ID: "assistant_1", Role: "assistant", Content: "已经读取完成。"},
+			},
+		},
+	}
+
+	printed := m.buildPendingTranscriptPrintText(true)
+
+	for _, want := range []string{"> 请读取配置", "• Read D:\\Auto\\research\\Astronomy\\ZhouXing\\README.md lines 1-5", "… +1 lines", "已经读取完成。"} {
+		if !contains(printed, want) {
+			t.Fatalf("printed transcript missing %q: %s", want, printed)
+		}
+	}
+}
+
+func TestBuildPendingTranscriptPrintTextOnlyPrintsNewBlocks(t *testing.T) {
+	m := Model{
+		collapseToolLogs: true,
+		activeSession: &SessionRecord{
+			ID: "session_incremental",
+			Messages: []ChatMessage{
+				{ID: "assistant_1", Role: "assistant", Content: "第一条"},
+			},
+		},
+	}
+
+	first := m.buildPendingTranscriptPrintText(true)
+	if !contains(first, "第一条") {
+		t.Fatalf("expected first transcript print to contain initial message: %s", first)
+	}
+
+	second := m.buildPendingTranscriptPrintText(false)
+	if second != "" {
+		t.Fatalf("expected no duplicate transcript output, got: %s", second)
+	}
+
+	m.activeSession.Messages = append(m.activeSession.Messages, ChatMessage{ID: "assistant_2", Role: "assistant", Content: "第二条"})
+	third := m.buildPendingTranscriptPrintText(false)
+	if strings.TrimSpace(third) != "第二条" {
+		t.Fatalf("expected only new message to be printed, got: %s", third)
 	}
 }
 
@@ -359,6 +625,50 @@ func newSessionPickerListForTest() list.Model {
 	sessionList.SetShowStatusBar(false)
 	sessionList.SetFilteringEnabled(true)
 	return sessionList
+}
+
+func newChatModelForLayoutTest() Model {
+	input := textarea.New()
+	input.Placeholder = "输入消息"
+	input.Prompt = "│ "
+	input.ShowLineNumbers = false
+	input.Focus()
+
+	return Model{
+		mode:             modeChat,
+		list:             newSessionPickerListForTest(),
+		viewport:         viewport.New(80, 20),
+		input:            input,
+		collapseToolLogs: true,
+		activeSession: &SessionRecord{
+			ID:    "session_layout",
+			Title: "布局测试",
+			Messages: []ChatMessage{
+				{ID: "user_1", Role: "user", Content: "请帮我检查日志折叠"},
+				{ID: "assistant_1", Role: "assistant", Content: "我会先读取相关文件。"},
+				{
+					ID:   "tool_read",
+					Role: "tool",
+					Name: "read_file",
+					Content: strings.Join([]string{
+						"File D:\\Auto\\research\\Astronomy\\ZhouXing\\internal\\tui\\model.go lines 1-5:",
+						"   1: package tui",
+						"   2: import (",
+						"   3: \"fmt\"",
+						"   4: \"strings\"",
+						"   5: \"time\"",
+					}, "\n"),
+				},
+			},
+		},
+		status: StatusPayload{
+			Model: "deepseek",
+			Context: ContextUsage{
+				UsedTokens:  12,
+				LimitTokens: 128,
+			},
+		},
+	}
 }
 
 func contains(text string, fragment string) bool {
