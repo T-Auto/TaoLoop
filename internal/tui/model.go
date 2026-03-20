@@ -68,6 +68,19 @@ var (
 			Background(lipgloss.Color("#111111")).
 			Foreground(lipgloss.Color("#F2F2F2")).
 			Padding(0, 1)
+	primaryKeyStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#4EA1FF")).
+			Bold(true)
+	dangerKeyStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#FF5F5F")).
+			Bold(true)
+	confirmTitleStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#FF7A7A")).
+				Bold(true)
+	confirmPanelStyle = panelStyle.Copy().
+				BorderForeground(lipgloss.Color("#FF5F5F")).
+				Background(lipgloss.Color("#120C0C")).
+				Padding(1, 2)
 )
 
 type sessionItem struct {
@@ -121,6 +134,7 @@ type Model struct {
 	sessions      []SessionSummary
 	activeSession *SessionRecord
 	followTail    bool
+	pendingDelete *SessionSummary
 }
 
 func New(rootDir string) (Model, error) {
@@ -228,8 +242,23 @@ func (m Model) View() string {
 		)
 		return pageStyle.Render(body)
 	case modeSessionPicker:
-		title := headerStyle.Render("周行") + "\n" + subtleStyle.Render("载入历史会话或新建会话")
-		body := panelStyle.Width(maxInt(48, m.width-8)).Render(title + "\n\n" + m.list.View())
+		titleLines := []string{
+			headerStyle.Render("周行"),
+			subtleStyle.Render("载入历史会话或新建会话"),
+		}
+		if m.lastErr != "" {
+			titleLines = append(titleLines, subtleStyle.Render("错误: "+m.lastErr))
+		}
+		title := strings.Join(titleLines, "\n")
+		panelWidth := maxInt(48, m.width-8)
+		panelInnerWidth := maxInt(32, panelWidth-4)
+		contentHeight := maxInt(10, m.height-14)
+		content := m.list.View()
+		if m.pendingDelete != nil {
+			content = lipgloss.Place(panelInnerWidth, contentHeight, lipgloss.Center, lipgloss.Center, m.renderDeleteConfirmDialog(panelInnerWidth))
+		}
+		help := m.renderSessionPickerHelp()
+		body := panelStyle.Width(panelWidth).Render(title + "\n\n" + content + "\n" + help)
 		return pageStyle.Render(body)
 	default:
 		header := m.renderHeader()
@@ -241,6 +270,29 @@ func (m Model) View() string {
 }
 
 func (m Model) updateSessionPicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.pendingDelete != nil {
+		switch msg.String() {
+		case "esc":
+			m.pendingDelete = nil
+			return m, nil
+		case "enter":
+			err := m.backend.Send(map[string]any{
+				"type":       "delete_session",
+				"session_id": m.pendingDelete.ID,
+			})
+			if err != nil {
+				m.lastErr = err.Error()
+				return m, nil
+			}
+			if m.activeSession != nil && m.activeSession.ID == m.pendingDelete.ID {
+				m.activeSession = nil
+			}
+			m.pendingDelete = nil
+			return m, nil
+		}
+		return m, nil
+	}
+
 	switch msg.String() {
 	case "enter":
 		item, ok := m.list.SelectedItem().(sessionItem)
@@ -261,6 +313,17 @@ func (m Model) updateSessionPicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if err != nil {
 			m.lastErr = err.Error()
 		}
+		return m, nil
+	case "delete":
+		if m.list.SettingFilter() {
+			break
+		}
+		item, ok := m.list.SelectedItem().(sessionItem)
+		if !ok || item.createNew {
+			return m, nil
+		}
+		summary := item.summary
+		m.pendingDelete = &summary
 		return m, nil
 	}
 
@@ -353,6 +416,7 @@ func (m *Model) applyEvent(event Event) {
 		}
 		sessionCopy := *event.Session
 		m.activeSession = &sessionCopy
+		m.pendingDelete = nil
 		m.mode = modeChat
 		m.followTail = true
 		m.rebuildViewport(true)
@@ -379,13 +443,17 @@ func (m *Model) applyEvent(event Event) {
 		if event.Tool == nil || m.activeSession == nil {
 			return
 		}
+		syntheticID := event.Tool.ID
+		if syntheticID == "" {
+			syntheticID = fmt.Sprintf("tool_event_%s_%s_%d", event.Tool.Tool, event.Tool.Phase, len(m.activeSession.Messages))
+		}
 		synthetic := ChatMessage{
-			ID:        fmt.Sprintf("tool_event_%s_%s_%d", event.Tool.Tool, event.Tool.Phase, len(m.activeSession.Messages)),
+			ID:        syntheticID,
 			Role:      "event",
 			Content:   formatToolEvent(*event.Tool),
 			CreatedAt: "",
 		}
-		m.insertMessage(synthetic, "")
+		m.insertMessage(synthetic, event.Tool.AfterMessageID)
 		m.rebuildViewport(false)
 	case "error":
 		m.lastErr = event.Error
@@ -509,6 +577,32 @@ func (m Model) renderStatus() string {
 	return strings.Join([]string{state, m.status.Model, ctx, queue, help}, "  |  ")
 }
 
+func (m Model) renderSessionPickerHelp() string {
+	parts := []string{
+		primaryKeyStyle.Render("Enter") + subtleStyle.Render(" 打开"),
+		subtleStyle.Render("←/→ 翻页"),
+		dangerKeyStyle.Render("Delete") + subtleStyle.Render(" 删除会话"),
+		subtleStyle.Render("/ 搜索"),
+		subtleStyle.Render("q 退出"),
+	}
+	return strings.Join(parts, "  ")
+}
+
+func (m Model) renderDeleteConfirmDialog(availableWidth int) string {
+	if m.pendingDelete == nil {
+		return ""
+	}
+	dialogWidth := minInt(64, maxInt(36, availableWidth-6))
+	body := strings.Join([]string{
+		confirmTitleStyle.Render("确认删除会话"),
+		headerStyle.Render(m.pendingDelete.Title),
+		subtleStyle.Render("删除后不可恢复。"),
+		"",
+		primaryKeyStyle.Render("Enter") + subtleStyle.Render(" 确认删除    ") + subtleStyle.Render("Esc 取消"),
+	}, "\n")
+	return confirmPanelStyle.Width(dialogWidth).Render(body)
+}
+
 func renderChatMessage(message ChatMessage, width int) string {
 	label := strings.ToUpper(message.Role)
 	if message.Role == "tool" && message.Name != "" {
@@ -582,6 +676,13 @@ func formatToolEvent(event ToolEvent) string {
 
 func maxInt(a, b int) int {
 	if a > b {
+		return a
+	}
+	return b
+}
+
+func minInt(a, b int) int {
+	if a < b {
 		return a
 	}
 	return b

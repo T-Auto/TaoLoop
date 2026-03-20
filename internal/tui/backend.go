@@ -75,20 +75,22 @@ type ProgressPayload struct {
 }
 
 type ToolEvent struct {
-	Tool        string         `json:"tool"`
-	Phase       string         `json:"phase"`
-	Command     string         `json:"command"`
-	CWD         string         `json:"cwd"`
-	Summary     string         `json:"summary"`
-	Text        string         `json:"text"`
-	Channel     string         `json:"channel"`
-	Step        int            `json:"step"`
-	AfterSec    int            `json:"after_sec"`
-	ExitCode    int            `json:"exit_code"`
-	DurationSec float64        `json:"duration_sec"`
-	TimeoutSec  int            `json:"timeout_sec"`
-	TimedOut    bool           `json:"timed_out"`
-	Arguments   map[string]any `json:"arguments"`
+	ID             string         `json:"id"`
+	AfterMessageID string         `json:"after_message_id"`
+	Tool           string         `json:"tool"`
+	Phase          string         `json:"phase"`
+	Command        string         `json:"command"`
+	CWD            string         `json:"cwd"`
+	Summary        string         `json:"summary"`
+	Text           string         `json:"text"`
+	Channel        string         `json:"channel"`
+	Step           int            `json:"step"`
+	AfterSec       int            `json:"after_sec"`
+	ExitCode       int            `json:"exit_code"`
+	DurationSec    float64        `json:"duration_sec"`
+	TimeoutSec     int            `json:"timeout_sec"`
+	TimedOut       bool           `json:"timed_out"`
+	Arguments      map[string]any `json:"arguments"`
 }
 
 type Event struct {

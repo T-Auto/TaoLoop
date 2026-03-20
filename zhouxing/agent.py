@@ -10,7 +10,7 @@ from .fallbacks import maybe_build_scientific_script_fallback
 from .llm import build_client
 from .logging_utils import FileLogger
 from .sessions import ChatMessage, SessionRecord
-from .tools import ToolRegistry
+from .tools import ToolEventCursor, ToolRegistry
 
 
 EmitCallback = Callable[[dict[str, Any]], Awaitable[None]]
@@ -36,6 +36,7 @@ class ConversationAgent:
         self.context_manager.compact(session)
         usage_info: dict[str, Any] = {}
         anchor_id = reply_to_message_id
+        display_anchor_id = reply_to_message_id
 
         for step in range(self.config.max_tool_rounds):
             prompt_messages, usage = self.context_manager.build(
@@ -87,6 +88,7 @@ class ConversationAgent:
                 )
             if response.tool_calls:
                 previous_anchor = anchor_id
+                previous_display_anchor = display_anchor_id
                 assistant_tool_call = ChatMessage.create(
                     "assistant",
                     response.content or "",
@@ -111,21 +113,29 @@ class ConversationAgent:
                         {
                             "type": "message",
                             "message": assistant_tool_call.to_public_dict(),
-                            "after_message_id": previous_anchor,
+                            "after_message_id": previous_display_anchor,
                         }
                     )
+                    display_anchor_id = assistant_tool_call.id
                 for call in response.tool_calls:
+                    tool_event_cursor = ToolEventCursor(display_anchor_id)
                     await self.emit(
-                        {
-                            "type": "tool_event",
-                            "tool": call.name,
-                            "phase": "call",
-                            "arguments": call.arguments,
-                            "step": step + 1,
-                        }
+                        tool_event_cursor.attach(
+                            {
+                                "type": "tool_event",
+                                "tool": call.name,
+                                "phase": "call",
+                                "arguments": call.arguments,
+                                "step": step + 1,
+                            }
+                        )
                     )
                     try:
-                        result = await self.tools.execute(call.name, call.arguments)
+                        result = await self.tools.execute(
+                            call.name,
+                            call.arguments,
+                            event_cursor=tool_event_cursor,
+                        )
                     except Exception as exc:
                         result = f"Tool {call.name} failed: {exc}"
                     tool_message = ChatMessage.create(
@@ -141,9 +151,10 @@ class ConversationAgent:
                         {
                             "type": "message",
                             "message": tool_message.to_public_dict(),
-                            "after_message_id": previous_anchor,
+                            "after_message_id": tool_event_cursor.after_message_id,
                         }
                     )
+                    display_anchor_id = tool_message.id
                 continue
 
             assistant_message = ChatMessage.create(
@@ -157,7 +168,7 @@ class ConversationAgent:
                 {
                     "type": "message",
                     "message": assistant_message.to_public_dict(),
-                    "after_message_id": previous_anchor,
+                    "after_message_id": display_anchor_id,
                 }
             )
             if self.logger:
@@ -179,7 +190,7 @@ class ConversationAgent:
             {
                 "type": "message",
                 "message": assistant_message.to_public_dict(),
-                "after_message_id": previous_anchor,
+                "after_message_id": display_anchor_id,
             }
         )
         if self.logger:
@@ -249,6 +260,7 @@ class ConversationAgent:
                 original_error=str(exc),
             )
 
+        display_anchor_id = anchor_id
         notice = ChatMessage.create(
             "assistant",
             (
@@ -262,10 +274,11 @@ class ConversationAgent:
             {
                 "type": "message",
                 "message": notice.to_public_dict(),
-                "after_message_id": anchor_id,
+                "after_message_id": display_anchor_id,
             }
         )
         anchor_id = notice.id
+        display_anchor_id = notice.id
 
         write_result = await self.tools.execute(
             "write_file",
@@ -281,11 +294,13 @@ class ConversationAgent:
             {
                 "type": "message",
                 "message": write_message.to_public_dict(),
-                "after_message_id": anchor_id,
+                "after_message_id": display_anchor_id,
             }
         )
         anchor_id = write_message.id
+        display_anchor_id = write_message.id
 
+        tool_event_cursor = ToolEventCursor(display_anchor_id)
         smoke_result = await self.tools.execute(
             "run_command",
             {
@@ -293,6 +308,7 @@ class ConversationAgent:
                 "cwd": ".",
                 "timeout_sec": 120,
             },
+            event_cursor=tool_event_cursor,
         )
         smoke_message = ChatMessage.create(
             "event",
@@ -304,10 +320,11 @@ class ConversationAgent:
             {
                 "type": "message",
                 "message": smoke_message.to_public_dict(),
-                "after_message_id": anchor_id,
+                "after_message_id": tool_event_cursor.after_message_id,
             }
         )
         anchor_id = smoke_message.id
+        display_anchor_id = smoke_message.id
 
         summary = ChatMessage.create(
             "assistant",
@@ -322,7 +339,7 @@ class ConversationAgent:
             {
                 "type": "message",
                 "message": summary.to_public_dict(),
-                "after_message_id": anchor_id,
+                "after_message_id": display_anchor_id,
             }
         )
         if self.logger:

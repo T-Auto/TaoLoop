@@ -204,6 +204,13 @@ class SessionStore:
         self.save(session)
         return session
 
+    def delete(self, session_id: str) -> bool:
+        path = self._path_for(session_id)
+        if not path.exists():
+            return False
+        path.unlink()
+        return True
+
     def load(self, session_id: str) -> SessionRecord:
         path = self._path_for(session_id)
         try:

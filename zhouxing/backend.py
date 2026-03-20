@@ -138,6 +138,27 @@ class BackendServer:
             await self._emit_status("idle")
             return
 
+        if request_type == "delete_session":
+            if self.busy:
+                await self._emit_error("Agent is busy; cannot delete a session yet.")
+                return
+            session_id = request.get("session_id")
+            if not session_id:
+                await self._emit_error("session_id is required.")
+                return
+            deleted = self.store.delete(session_id)
+            if not deleted:
+                await self._emit_error(f"Session not found: {session_id}")
+                return
+            was_active = self.active_session is not None and self.active_session.id == session_id
+            if was_active:
+                self.active_session = None
+            self.logger.log("backend_session_deleted", session_id=session_id, was_active=was_active)
+            await self._emit_session_list()
+            if was_active:
+                await self._emit_status("idle")
+            return
+
         if request_type == "user_message":
             if self.active_session is None:
                 self.active_session = self.store.create()

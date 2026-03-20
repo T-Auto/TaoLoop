@@ -7,6 +7,7 @@ import os
 import re
 import subprocess
 import time
+import uuid
 
 from .config import Config
 from .logging_utils import FileLogger
@@ -21,6 +22,24 @@ def _clip(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return f"{text[:limit]}\n...[truncated {len(text) - limit} chars]"
+
+
+def _new_tool_event_id() -> str:
+    return f"tool_event_{uuid.uuid4().hex[:12]}"
+
+
+class ToolEventCursor:
+    def __init__(self, after_message_id: str = "") -> None:
+        self.after_message_id = after_message_id
+
+    def attach(self, payload: dict[str, Any]) -> dict[str, Any]:
+        event_id = _new_tool_event_id()
+        enriched = dict(payload)
+        enriched["id"] = event_id
+        if self.after_message_id:
+            enriched["after_message_id"] = self.after_message_id
+        self.after_message_id = event_id
+        return enriched
 
 
 class ToolRegistry:
@@ -153,7 +172,13 @@ class ToolRegistry:
             },
         ]
 
-    async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+    async def execute(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        *,
+        event_cursor: ToolEventCursor | None = None,
+    ) -> str:
         if self.logger:
             self.logger.log("tool_execute_start", tool=name, arguments=arguments)
         if name == "list_directory":
@@ -169,7 +194,7 @@ class ToolRegistry:
         elif name == "replace_in_file":
             result = await self._replace_in_file(**arguments)
         elif name == "run_command":
-            result = await self._run_command(**arguments)
+            result = await self._run_command(event_cursor=event_cursor, **arguments)
         else:
             raise ValueError(f"Unknown tool: {name}")
         if self.logger:
@@ -180,10 +205,18 @@ class ToolRegistry:
             )
         return result
 
-    async def _emit(self, payload: dict[str, Any]) -> None:
+    async def _emit(
+        self,
+        payload: dict[str, Any],
+        *,
+        event_cursor: ToolEventCursor | None = None,
+    ) -> None:
         if self.emit is None:
             return
-        result = self.emit(payload)
+        enriched = payload
+        if event_cursor is not None and payload.get("type") == "tool_event":
+            enriched = event_cursor.attach(payload)
+        result = self.emit(enriched)
         if asyncio.iscoroutine(result):
             await result
 
@@ -341,6 +374,7 @@ class ToolRegistry:
         command: str,
         cwd: str = ".",
         timeout_sec: int = 0,
+        event_cursor: ToolEventCursor | None = None,
     ) -> str:
         target_cwd = self._resolve_path(cwd)
         env = os.environ.copy()
@@ -359,7 +393,8 @@ class ToolRegistry:
                 "command": command,
                 "cwd": str(target_cwd),
                 "monitor_schedule_sec": list(self.config.monitor_intervals),
-            }
+            },
+            event_cursor=event_cursor,
         )
 
         process = subprocess.Popen(
@@ -402,7 +437,8 @@ class ToolRegistry:
                             "phase": "output",
                             "channel": channel,
                             "text": _clip(text, 800),
-                        }
+                        },
+                        event_cursor=event_cursor,
                     )
                 elif emitted_lines == max_lines:
                     emitted_lines += 1
@@ -413,7 +449,8 @@ class ToolRegistry:
                             "phase": "output_truncated",
                             "channel": channel,
                             "text": "stdout/stderr UI output truncated; backend still keeps the latest tail for summary.",
-                        }
+                        },
+                        event_cursor=event_cursor,
                     )
 
         async def heartbeat_loop() -> None:
@@ -432,7 +469,8 @@ class ToolRegistry:
                         "after_sec": interval,
                         "snapshot": snapshot,
                         "summary": self.monitor.format_snapshot(snapshot),
-                    }
+                    },
+                    event_cursor=event_cursor,
                 )
 
         stdout_task = asyncio.create_task(pump_stream(process.stdout, "stdout", stdout_lines))
@@ -457,7 +495,8 @@ class ToolRegistry:
                     "phase": "timeout",
                     "timeout_sec": timeout_sec,
                     "pid": process.pid,
-                }
+                },
+                event_cursor=event_cursor,
             )
             await self._terminate_process_tree(process.pid)
             await asyncio.to_thread(process.wait)
@@ -486,7 +525,8 @@ class ToolRegistry:
                 "timed_out": timed_out,
                 "snapshot": final_snapshot,
                 "summary": self.monitor.format_snapshot(final_snapshot),
-            }
+            },
+            event_cursor=event_cursor,
         )
 
         stdout_text = _clip("\n".join(stdout_lines), self.config.max_output_chars)
