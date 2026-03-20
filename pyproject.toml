@@ -1,0 +1,20 @@
+[project]
+name = "zhouxing"
+version = "0.1.0"
+description = "ZhouXing scientific agent CLI backend"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "httpx>=0.28.1",
+  "psutil>=7.0.0",
+]
+
+[project.scripts]
+zhouxing-backend = "zhouxing.backend:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+package = true

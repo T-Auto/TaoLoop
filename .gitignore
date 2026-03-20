@@ -1,0 +1,40 @@
+# Secrets and local env
+.env
+.env.*
+!.env.example
+
+# Local app data
+.zhouxing/
+.tmp/
+MEMORY_BANK.md
+
+# Virtual environments
+.venv/
+**/.venv/
+
+# Python caches and tooling
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Build outputs
+bin/
+build/
+dist/
+*.exe
+*.test
+*.out
+
+# Generated artifacts
+hello_sim_result.json
+sandbox/generated_science_compute_*.py
+sandbox/*_result.json
+*.go.[0-9]*
+
+# Editor / OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
