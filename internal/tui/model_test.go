@@ -3,10 +3,13 @@ package tui
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
@@ -172,6 +175,160 @@ func TestEscCancelsDeleteConfirmation(t *testing.T) {
 
 	if updated.pendingDelete != nil {
 		t.Fatalf("expected pending delete session to be cleared on esc")
+	}
+}
+
+func TestCopyTranscriptShortcutWritesClipboard(t *testing.T) {
+	oldWriteClipboard := writeClipboard
+	defer func() {
+		writeClipboard = oldWriteClipboard
+	}()
+
+	var copied string
+	writeClipboard = func(text string) error {
+		copied = text
+		return nil
+	}
+
+	m := Model{
+		mode: modeChat,
+		activeSession: &SessionRecord{
+			ID: "session_copy",
+			Messages: []ChatMessage{
+				{ID: "user_1", Role: "user", Content: "你好"},
+				{ID: "assistant_1", Role: "assistant", Content: "世界"},
+				{ID: "tool_1", Role: "tool", Name: "read_file", Content: "result.txt"},
+			},
+		},
+	}
+
+	updatedModel, _ := m.updateChat(tea.KeyMsg{Type: tea.KeyCtrlY})
+	updated := updatedModel.(Model)
+
+	want := "USER\n你好\n\nASSISTANT\n世界\n\nTOOL/READ_FILE\nresult.txt"
+	if copied != want {
+		t.Fatalf("clipboard content mismatch:\nwant:\n%s\n\ngot:\n%s", want, copied)
+	}
+	if updated.notice != "已复制当前会话到系统剪贴板" {
+		t.Fatalf("unexpected notice: %q", updated.notice)
+	}
+}
+
+func TestCopyTranscriptShortcutReportsClipboardError(t *testing.T) {
+	oldWriteClipboard := writeClipboard
+	defer func() {
+		writeClipboard = oldWriteClipboard
+	}()
+
+	writeClipboard = func(string) error {
+		return errors.New("clipboard unavailable")
+	}
+
+	m := Model{
+		mode: modeChat,
+		activeSession: &SessionRecord{
+			ID: "session_copy",
+			Messages: []ChatMessage{
+				{ID: "assistant_1", Role: "assistant", Content: "世界"},
+			},
+		},
+	}
+
+	updatedModel, _ := m.updateChat(tea.KeyMsg{Type: tea.KeyF5})
+	updated := updatedModel.(Model)
+
+	if updated.notice != "" {
+		t.Fatalf("expected notice to stay empty on error, got %q", updated.notice)
+	}
+	if !strings.Contains(updated.lastErr, "写入系统剪贴板失败") {
+		t.Fatalf("expected clipboard error, got %q", updated.lastErr)
+	}
+}
+
+func TestRenderStatusShowsCopyHint(t *testing.T) {
+	m := Model{
+		status: StatusPayload{
+			Model: "deepseek",
+			Context: ContextUsage{
+				UsedTokens:  12,
+				LimitTokens: 128,
+			},
+		},
+	}
+
+	status := m.renderStatus()
+	for _, want := range []string{"Ctrl+V/Insert 粘贴", "Ctrl+Y/F5 复制"} {
+		if !contains(status, want) {
+			t.Fatalf("status missing hint %q: %s", want, status)
+		}
+	}
+}
+
+func TestCtrlVPastesClipboardIntoInput(t *testing.T) {
+	oldReadClipboard := readClipboard
+	oldTimeNow := timeNow
+	defer func() {
+		readClipboard = oldReadClipboard
+		timeNow = oldTimeNow
+	}()
+
+	readClipboard = func() (string, error) {
+		return "第一行\r\n第二行", nil
+	}
+	timeNow = func() time.Time {
+		return time.Unix(100, 0)
+	}
+
+	m := Model{
+		mode:  modeChat,
+		input: textarea.New(),
+	}
+	m.input.Focus()
+
+	updatedModel, _ := m.updateChat(tea.KeyMsg{Type: tea.KeyCtrlV})
+	updated := updatedModel.(Model)
+
+	if updated.notice != "已从系统剪贴板粘贴" {
+		t.Fatalf("unexpected notice: %q", updated.notice)
+	}
+	if got := updated.input.Value(); got != "第一行\n第二行" {
+		t.Fatalf("unexpected pasted input: %q", got)
+	}
+}
+
+func TestEnterDuringPasteBurstInsertsNewlineInsteadOfSending(t *testing.T) {
+	oldTimeNow := timeNow
+	defer func() {
+		timeNow = oldTimeNow
+	}()
+
+	now := time.Unix(100, 0)
+	timeNow = func() time.Time {
+		return now
+	}
+
+	var sink bytes.Buffer
+	m := Model{
+		mode:  modeChat,
+		input: textarea.New(),
+		backend: &BackendClient{
+			stdin: nopWriteCloser{Buffer: &sink},
+		},
+	}
+	m.input.Focus()
+
+	updatedModel, _ := m.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("hello")})
+	updated := updatedModel.(Model)
+
+	now = now.Add(10 * time.Millisecond)
+	updatedModel, _ = updated.updateChat(tea.KeyMsg{Type: tea.KeyEnter})
+	updated = updatedModel.(Model)
+
+	if sink.Len() != 0 {
+		t.Fatalf("expected no backend send during paste burst, got %q", sink.String())
+	}
+	if got := updated.input.Value(); got != "hello\n" {
+		t.Fatalf("unexpected input after enter: %q", got)
 	}
 }
 

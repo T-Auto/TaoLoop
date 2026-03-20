@@ -3,7 +3,9 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
@@ -115,6 +117,12 @@ type backendEventMsg struct {
 
 type backendClosedMsg struct{}
 
+var writeClipboard = clipboard.WriteAll
+var readClipboard = clipboard.ReadAll
+var timeNow = time.Now
+
+const pasteBurstWindow = 40 * time.Millisecond
+
 type Model struct {
 	rootDir string
 	backend *BackendClient
@@ -126,6 +134,7 @@ type Model struct {
 	ready    *ReadyPayload
 	status   StatusPayload
 	lastErr  string
+	notice   string
 	spinner  spinner.Model
 	list     list.Model
 	viewport viewport.Model
@@ -135,6 +144,9 @@ type Model struct {
 	activeSession *SessionRecord
 	followTail    bool
 	pendingDelete *SessionSummary
+
+	lastTextInputAt  time.Time
+	likelyPasteBurst bool
 }
 
 func New(rootDir string) (Model, error) {
@@ -156,7 +168,7 @@ func New(rootDir string) (Model, error) {
 	sessionList.SetFilteringEnabled(true)
 
 	input := textarea.New()
-	input.Placeholder = "输入消息，Enter 发送，Ctrl+L 返回会话列表，Ctrl+N 新建会话"
+	input.Placeholder = "输入消息，Enter 发送，Ctrl+V/Insert 粘贴，Ctrl+Y/F5 复制会话，Ctrl+L 返回会话列表"
 	input.Prompt = "│ "
 	input.ShowLineNumbers = false
 	input.SetHeight(4)
@@ -224,6 +236,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mode == modeChat {
 			return m.updateChat(msg)
 		}
+	}
+	if m.mode == modeChat {
+		return m.updateChatInput(msg)
 	}
 	return m, nil
 }
@@ -341,6 +356,16 @@ func (m Model) updateChat(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+n":
 		_ = m.backend.Send(map[string]any{"type": "create_session"})
 		return m, nil
+	case "ctrl+v", "insert":
+		return m.pasteIntoInput()
+	case "ctrl+y", "f5":
+		if err := m.copyActiveSessionToClipboard(); err != nil {
+			m.notice = ""
+			m.lastErr = err.Error()
+			return m, nil
+		}
+		m.notice = "已复制当前会话到系统剪贴板"
+		return m, nil
 	case "ctrl+up", "alt+up":
 		m.followTail = false
 		m.viewport.LineUp(1)
@@ -366,6 +391,11 @@ func (m Model) updateChat(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.followTail = true
 		return m, nil
 	case "enter":
+		if m.shouldTreatEnterAsPastedNewline() {
+			m.input.InsertString("\n")
+			m.markLikelyPaste()
+			return m, nil
+		}
 		content := strings.TrimSpace(m.input.Value())
 		if content == "" {
 			return m, nil
@@ -379,12 +409,13 @@ func (m Model) updateChat(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.input.Reset()
+		m.likelyPasteBurst = false
+		m.lastTextInputAt = time.Time{}
 		return m, nil
 	}
 
-	var cmd tea.Cmd
-	m.input, cmd = m.input.Update(msg)
-	return m, cmd
+	m.trackTextEntry(msg)
+	return m.updateChatInput(msg)
 }
 
 func (m Model) updateChatMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
@@ -394,6 +425,12 @@ func (m Model) updateChatMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if m.viewport.YOffset != prevOffset {
 		m.followTail = m.viewport.AtBottom()
 	}
+	return m, cmd
+}
+
+func (m Model) updateChatInput(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(msg)
 	return m, cmd
 }
 
@@ -573,8 +610,13 @@ func (m Model) renderStatus() string {
 	}
 	ctx := fmt.Sprintf("ctx %d/%d", m.status.Context.UsedTokens, m.status.Context.LimitTokens)
 	queue := fmt.Sprintf("queue %d", m.status.QueueLength)
-	help := "Enter 发送  PgUp/PgDn/鼠标滚轮滚动  End 回底  Ctrl+L 会话"
-	return strings.Join([]string{state, m.status.Model, ctx, queue, help}, "  |  ")
+	help := "Enter 发送  Ctrl+V/Insert 粘贴  Ctrl+Y/F5 复制  PgUp/PgDn 滚动  Ctrl+L 会话"
+	parts := []string{state, m.status.Model, ctx, queue}
+	if m.notice != "" {
+		parts = append(parts, m.notice)
+	}
+	parts = append(parts, help)
+	return strings.Join(parts, "  |  ")
 }
 
 func (m Model) renderSessionPickerHelp() string {
@@ -604,13 +646,7 @@ func (m Model) renderDeleteConfirmDialog(availableWidth int) string {
 }
 
 func renderChatMessage(message ChatMessage, width int) string {
-	label := strings.ToUpper(message.Role)
-	if message.Role == "tool" && message.Name != "" {
-		label = "TOOL/" + strings.ToUpper(message.Name)
-	}
-	if message.Role == "event" {
-		label = "EVENT"
-	}
+	label := chatMessageLabel(message)
 
 	body := styleMessageBody(message.Content, maxInt(20, width-2))
 	text := headerStyle.Render(label) + "\n" + body
@@ -624,6 +660,106 @@ func renderChatMessage(message ChatMessage, width int) string {
 	default:
 		return eventBlockStyle.Width(width).Render(text)
 	}
+}
+
+func (m Model) copyActiveSessionToClipboard() error {
+	if m.activeSession == nil {
+		return fmt.Errorf("当前没有活动会话可复制")
+	}
+	transcript := buildTranscriptText(m.activeSession)
+	if strings.TrimSpace(transcript) == "" {
+		return fmt.Errorf("当前会话没有可复制内容")
+	}
+	if err := writeClipboard(transcript); err != nil {
+		return fmt.Errorf("写入系统剪贴板失败: %w", err)
+	}
+	return nil
+}
+
+func (m Model) pasteIntoInput() (tea.Model, tea.Cmd) {
+	text, err := readClipboard()
+	if err != nil {
+		m.notice = ""
+		m.lastErr = fmt.Sprintf("读取系统剪贴板失败: %v", err)
+		return m, nil
+	}
+	if text == "" {
+		return m, nil
+	}
+	text = normalizeClipboardText(text)
+	m.input.InsertString(text)
+	m.notice = "已从系统剪贴板粘贴"
+	m.lastErr = ""
+	m.markLikelyPaste()
+	return m, nil
+}
+
+func normalizeClipboardText(text string) string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+	return text
+}
+
+func (m *Model) trackTextEntry(msg tea.KeyMsg) {
+	if msg.Type != tea.KeyRunes || len(msg.Runes) == 0 {
+		m.clearLikelyPasteIfExpired()
+		return
+	}
+	now := timeNow()
+	likelyPaste := msg.Paste || len(msg.Runes) > 1
+	if !m.lastTextInputAt.IsZero() && now.Sub(m.lastTextInputAt) <= pasteBurstWindow {
+		likelyPaste = true
+	}
+	m.lastTextInputAt = now
+	m.likelyPasteBurst = likelyPaste
+}
+
+func (m *Model) markLikelyPaste() {
+	m.lastTextInputAt = timeNow()
+	m.likelyPasteBurst = true
+}
+
+func (m *Model) clearLikelyPasteIfExpired() {
+	if m.lastTextInputAt.IsZero() {
+		m.likelyPasteBurst = false
+		return
+	}
+	if timeNow().Sub(m.lastTextInputAt) > pasteBurstWindow {
+		m.likelyPasteBurst = false
+	}
+}
+
+func (m *Model) shouldTreatEnterAsPastedNewline() bool {
+	if !m.likelyPasteBurst || m.lastTextInputAt.IsZero() {
+		return false
+	}
+	return timeNow().Sub(m.lastTextInputAt) <= pasteBurstWindow
+}
+
+func buildTranscriptText(session *SessionRecord) string {
+	if session == nil || len(session.Messages) == 0 {
+		return ""
+	}
+	blocks := make([]string, 0, len(session.Messages))
+	for _, message := range session.Messages {
+		body := strings.TrimRight(message.Content, "\n")
+		if body == "" {
+			body = "(empty)"
+		}
+		blocks = append(blocks, chatMessageLabel(message)+"\n"+body)
+	}
+	return strings.Join(blocks, "\n\n")
+}
+
+func chatMessageLabel(message ChatMessage) string {
+	label := strings.ToUpper(message.Role)
+	if message.Role == "tool" && message.Name != "" {
+		label = "TOOL/" + strings.ToUpper(message.Name)
+	}
+	if message.Role == "event" {
+		label = "EVENT"
+	}
+	return label
 }
 
 func styleMessageBody(content string, width int) string {

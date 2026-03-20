@@ -28,7 +28,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	program := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseAllMotion())
+	program := tea.NewProgram(model)
 	if _, err := program.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "run TUI failed: %v\n", err)
 		os.Exit(1)
