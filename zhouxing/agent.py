@@ -14,16 +14,28 @@ from .tools import ToolEventCursor, ToolRegistry
 
 
 EmitCallback = Callable[[dict[str, Any]], Awaitable[None]]
+HasBufferedUserInput = Callable[[str], Awaitable[bool]]
+FlushBufferedMessages = Callable[[], Awaitable[None]]
 
 
 class ConversationAgent:
-    def __init__(self, config: Config, emit: EmitCallback, logger: FileLogger | None = None):
+    def __init__(
+        self,
+        config: Config,
+        emit: EmitCallback,
+        logger: FileLogger | None = None,
+        tools: ToolRegistry | None = None,
+        has_buffered_user_input: HasBufferedUserInput | None = None,
+        flush_buffered_messages: FlushBufferedMessages | None = None,
+    ):
         self.config = config
         self.emit = emit
         self.logger = logger
         self.context_manager = ContextManager(config)
         self.client = build_client(config, logger=logger)
-        self.tools = ToolRegistry(config, emit=self.emit, logger=logger)
+        self.tools = tools or ToolRegistry(config, emit=self.emit, logger=logger)
+        self.has_buffered_user_input = has_buffered_user_input
+        self.flush_buffered_messages = flush_buffered_messages
 
     async def run_turn(self, session: SessionRecord, reply_to_message_id: str) -> dict[str, Any]:
         if self.logger:
@@ -117,7 +129,30 @@ class ConversationAgent:
                         }
                     )
                     display_anchor_id = assistant_tool_call.id
-                for call in response.tool_calls:
+                for call_index, call in enumerate(response.tool_calls):
+                    if await self._should_yield_to_buffered_user_input(session.id):
+                        anchor_id, display_anchor_id = await self._skip_remaining_tool_calls(
+                            session,
+                            response.tool_calls[call_index:],
+                            anchor_id=anchor_id,
+                            display_anchor_id=display_anchor_id,
+                        )
+                        notice = ChatMessage.create(
+                            "assistant",
+                            "检测到新的用户输入，当前剩余工具调用已让位给更新请求。接下来优先处理最新消息。",
+                            meta={"interrupted": True},
+                        )
+                        session.insert_after(anchor_id, notice)
+                        await self.emit(
+                            {
+                                "type": "message",
+                                "message": notice.to_public_dict(),
+                                "after_message_id": display_anchor_id,
+                            }
+                        )
+                        if self.flush_buffered_messages is not None:
+                            await self.flush_buffered_messages()
+                        return usage_info
                     tool_event_cursor = ToolEventCursor(display_anchor_id)
                     await self.emit(
                         tool_event_cursor.attach(
@@ -155,6 +190,8 @@ class ConversationAgent:
                         }
                     )
                     display_anchor_id = tool_message.id
+                    if self.flush_buffered_messages is not None:
+                        await self.flush_buffered_messages()
                 continue
 
             assistant_message = ChatMessage.create(
@@ -201,6 +238,44 @@ class ConversationAgent:
                 mode="max_tool_rounds",
             )
         return usage_info
+
+    async def _should_yield_to_buffered_user_input(self, session_id: str) -> bool:
+        if self.has_buffered_user_input is None:
+            return False
+        return await self.has_buffered_user_input(session_id)
+
+    async def _skip_remaining_tool_calls(
+        self,
+        session: SessionRecord,
+        calls: list[Any],
+        *,
+        anchor_id: str,
+        display_anchor_id: str,
+    ) -> tuple[str, str]:
+        current_anchor = anchor_id
+        current_display_anchor = display_anchor_id
+        for call in calls:
+            tool_message = ChatMessage.create(
+                "tool",
+                (
+                    f"Tool {call.name} skipped before execution because a newer user message "
+                    "entered the buffer queue."
+                ),
+                name=call.name,
+                tool_call_id=call.id,
+                meta={"skipped": True, "reason": "newer_user_input"},
+            )
+            session.insert_after(current_anchor, tool_message)
+            await self.emit(
+                {
+                    "type": "message",
+                    "message": tool_message.to_public_dict(),
+                    "after_message_id": current_display_anchor,
+                }
+            )
+            current_anchor = tool_message.id
+            current_display_anchor = tool_message.id
+        return current_anchor, current_display_anchor
 
     async def _complete_with_progress(
         self,

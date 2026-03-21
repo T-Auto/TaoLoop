@@ -234,6 +234,7 @@ type Model struct {
 
 	sessions         []SessionSummary
 	activeSession    *SessionRecord
+	jobs             []BackgroundJob
 	followTail       bool
 	collapseToolLogs bool
 	printedBlockKeys map[string]struct{}
@@ -376,11 +377,16 @@ func (m Model) renderSessionPickerView() string {
 
 func (m Model) renderChatView() string {
 	status := truncateToWidth(m.renderStatus(), maxInt(1, m.width))
-	return strings.Join([]string{
+	runningJobs := m.renderRunningJobs(maxInt(1, m.width))
+	parts := []string{
 		status,
 		"",
 		m.input.View(),
-	}, "\n")
+	}
+	if runningJobs != "" {
+		parts = append(parts, "", runningJobs)
+	}
+	return strings.Join(parts, "\n")
 }
 
 func (m Model) updateSessionPicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -581,6 +587,9 @@ func (m *Model) applyEvent(event Event) tea.Cmd {
 		if event.Message == nil || m.activeSession == nil {
 			return nil
 		}
+		if event.SessionID != "" && m.activeSession.ID != event.SessionID {
+			return nil
+		}
 		m.insertMessage(*event.Message, event.AfterMessageID)
 		m.rebuildViewport(false)
 		return m.flushTranscriptPrintCmd(false)
@@ -588,6 +597,9 @@ func (m *Model) applyEvent(event Event) tea.Cmd {
 		if event.Status != nil {
 			m.status = *event.Status
 		}
+		return nil
+	case "jobs":
+		m.jobs = event.Jobs
 		return nil
 	case "progress":
 		if event.Progress != nil {
@@ -1035,6 +1047,12 @@ func (m Model) renderStatus() string {
 	if m.status.Model != "" {
 		parts = append(parts, m.status.Model)
 	}
+	if len(m.runningJobs()) > 0 {
+		parts = append(parts, fmt.Sprintf("后台脚本 %d", len(m.runningJobs())))
+	}
+	if m.status.QueueLength > 0 {
+		parts = append(parts, fmt.Sprintf("缓冲 %d", m.status.QueueLength))
+	}
 	parts = append(parts, logState)
 	if m.notice != "" {
 		parts = append(parts, m.notice)
@@ -1043,6 +1061,44 @@ func (m Model) renderStatus() string {
 	}
 	parts = append(parts, help)
 	return strings.Join(parts, "  |  ")
+}
+
+func (m Model) runningJobs() []BackgroundJob {
+	running := make([]BackgroundJob, 0, len(m.jobs))
+	for _, job := range m.jobs {
+		if job.Status == "running" {
+			running = append(running, job)
+		}
+	}
+	return running
+}
+
+func (m Model) renderRunningJobs(width int) string {
+	jobs := m.runningJobs()
+	if len(jobs) == 0 {
+		return subtleStyle.Width(width).Render("后台脚本: 无")
+	}
+	lines := []string{
+		headerStyle.Width(width).Render(fmt.Sprintf("后台脚本 %d 个", len(jobs))),
+	}
+	maxVisible := minInt(3, len(jobs))
+	for _, job := range jobs[:maxVisible] {
+		line := fmt.Sprintf(
+			"%s  %s  pid=%d  %s",
+			formatBackgroundRuntime(job.RuntimeSec),
+			job.Status,
+			job.PID,
+			job.Command,
+		)
+		if job.LastLogLine != "" {
+			line += "  |  " + job.LastLogLine
+		}
+		lines = append(lines, subtleStyle.Width(width).Render(truncateToWidth(line, width)))
+	}
+	if len(jobs) > maxVisible {
+		lines = append(lines, logOmittedStyle.Width(width).Render(fmt.Sprintf("… +%d 个后台脚本", len(jobs)-maxVisible)))
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m Model) renderSessionPickerHelp() string {
@@ -1099,6 +1155,22 @@ type runCommandSummary struct {
 	Resources  string
 	StdoutTail []string
 	StderrTail []string
+}
+
+type backgroundJobSummary struct {
+	Intro             string
+	JobID             string
+	Command           string
+	CWD               string
+	Status            string
+	PID               string
+	Runtime           string
+	StartedAt         string
+	ExitCode          string
+	TimedOut          string
+	HeartbeatAfterSec string
+	RecentLogs        []string
+	Hardware          []string
 }
 
 func makeSyntheticToolEventMessage(event ToolEvent, messageCount int) ChatMessage {
@@ -1302,6 +1374,17 @@ func summarizeToolPayload(toolName string, content string, args map[string]any) 
 		}
 		return header, lines
 	}
+	if toolName == "start_background_command" {
+		summary := parseBackgroundJobSummary(payload)
+		if intro != "" && summary.Intro == "" {
+			summary.Intro = intro
+		}
+		header := summarizeToolCallHeader(toolName, args)
+		if header == "" && summary.Command != "" {
+			header = "• Background " + summary.Command
+		}
+		return header, backgroundJobBodyLines(summary)
+	}
 
 	header := ""
 	if args != nil {
@@ -1400,6 +1483,20 @@ func summarizeToolCallHeader(toolName string, args map[string]any) string {
 			return ""
 		}
 		return "• Ran " + command
+	case "start_background_command":
+		command := stringFromAny(args["command"])
+		if command == "" {
+			return "• Started background job"
+		}
+		return "• Background " + command
+	case "list_background_jobs":
+		return "• Background jobs"
+	case "inspect_background_job":
+		jobID := stringFromAny(args["job_id"])
+		if jobID == "" {
+			return "• Background job details"
+		}
+		return "• Background job " + jobID
 	case "read_file":
 		path := stringFromAny(args["path"])
 		startLine := intFromAny(args["start_line"])
@@ -1475,6 +1572,10 @@ func summarizeToolResultHeader(toolName string, content string) string {
 		return "• Search results"
 	case toolName == "run_command" && strings.HasPrefix(first, "command="):
 		return "• Ran " + strings.TrimPrefix(first, "command=")
+	case toolName == "start_background_command" && strings.HasPrefix(first, "job_id="):
+		return "• Background job"
+	case toolName == "list_background_jobs" && strings.HasPrefix(first, "Background jobs:"):
+		return "• Background jobs"
 	default:
 		return summarizeToolCallHeader(toolName, nil)
 	}
@@ -1490,7 +1591,7 @@ func summarizeToolResultLines(toolName string, content string) []string {
 		if len(lines) > 1 {
 			return lines[1:]
 		}
-	case "write_file", "insert_text", "replace_in_file":
+	case "write_file", "insert_text", "replace_in_file", "list_background_jobs", "inspect_background_job":
 		return lines
 	}
 	return lines
@@ -1518,6 +1619,8 @@ func toolPayloadMarkers(toolName string) []string {
 	switch toolName {
 	case "run_command":
 		return []string{"command="}
+	case "start_background_command":
+		return []string{"job_id=", "command=", "后台脚本"}
 	case "read_file":
 		return []string{"File "}
 	case "list_directory":
@@ -1575,6 +1678,64 @@ func parseRunCommandSummary(content string) runCommandSummary {
 	return summary
 }
 
+func parseBackgroundJobSummary(content string) backgroundJobSummary {
+	lines := splitContentLines(content)
+	summary := backgroundJobSummary{}
+	section := ""
+	for _, line := range lines {
+		switch {
+		case line == "recent_logs:":
+			section = "logs"
+		case line == "hardware:":
+			section = "hardware"
+		case strings.HasPrefix(line, "job_id="):
+			summary.JobID = strings.TrimPrefix(line, "job_id=")
+			section = ""
+		case strings.HasPrefix(line, "command="):
+			summary.Command = strings.TrimPrefix(line, "command=")
+			section = ""
+		case strings.HasPrefix(line, "cwd="):
+			summary.CWD = strings.TrimPrefix(line, "cwd=")
+			section = ""
+		case strings.HasPrefix(line, "status="):
+			summary.Status = strings.TrimPrefix(line, "status=")
+			section = ""
+		case strings.HasPrefix(line, "pid="):
+			summary.PID = strings.TrimPrefix(line, "pid=")
+			section = ""
+		case strings.HasPrefix(line, "elapsed_sec="):
+			summary.Runtime = strings.TrimPrefix(line, "elapsed_sec=")
+			section = ""
+		case strings.HasPrefix(line, "runtime_sec="):
+			summary.Runtime = strings.TrimPrefix(line, "runtime_sec=")
+			section = ""
+		case strings.HasPrefix(line, "started_at="):
+			summary.StartedAt = strings.TrimPrefix(line, "started_at=")
+			section = ""
+		case strings.HasPrefix(line, "exit_code="):
+			summary.ExitCode = strings.TrimPrefix(line, "exit_code=")
+			section = ""
+		case strings.HasPrefix(line, "timed_out="):
+			summary.TimedOut = strings.TrimPrefix(line, "timed_out=")
+			section = ""
+		case strings.HasPrefix(line, "heartbeat_after_sec="):
+			summary.HeartbeatAfterSec = strings.TrimPrefix(line, "heartbeat_after_sec=")
+			section = ""
+		case strings.HasPrefix(line, "后台脚本"):
+			summary.Intro = line
+			section = ""
+		default:
+			switch section {
+			case "logs":
+				summary.RecentLogs = append(summary.RecentLogs, line)
+			case "hardware":
+				summary.Hardware = append(summary.Hardware, line)
+			}
+		}
+	}
+	return summary
+}
+
 func runCommandBodyLines(summary runCommandSummary) []string {
 	lines := []string{}
 	if summary.CWD != "" {
@@ -1605,6 +1766,47 @@ func runCommandBodyLines(summary runCommandSummary) []string {
 	}
 	if len(status) > 0 {
 		lines = append(lines, strings.Join(status, " | "))
+	}
+	return lines
+}
+
+func backgroundJobBodyLines(summary backgroundJobSummary) []string {
+	lines := []string{}
+	if summary.Intro != "" {
+		lines = append(lines, summary.Intro)
+	}
+	statusParts := []string{}
+	if summary.JobID != "" {
+		statusParts = append(statusParts, "job="+summary.JobID)
+	}
+	if summary.Status != "" {
+		statusParts = append(statusParts, "status="+summary.Status)
+	}
+	if summary.PID != "" {
+		statusParts = append(statusParts, "pid="+summary.PID)
+	}
+	if summary.Runtime != "" {
+		statusParts = append(statusParts, "elapsed="+summary.Runtime+"s")
+	}
+	if summary.HeartbeatAfterSec != "" {
+		statusParts = append(statusParts, "heartbeat="+summary.HeartbeatAfterSec+"s")
+	}
+	if len(statusParts) > 0 {
+		lines = append(lines, strings.Join(statusParts, " | "))
+	}
+	if summary.CWD != "" {
+		lines = append(lines, "cwd: "+summary.CWD)
+	}
+	lines = append(lines, summary.RecentLogs...)
+	if summary.ExitCode != "" {
+		lines = append(lines, "exit="+summary.ExitCode)
+	}
+	if summary.TimedOut != "" && summary.TimedOut != "false" && summary.TimedOut != "False" {
+		lines = append(lines, "timed_out="+summary.TimedOut)
+	}
+	lines = append(lines, summary.Hardware...)
+	if len(lines) == 0 {
+		lines = append(lines, "(no output)")
 	}
 	return lines
 }
@@ -2295,6 +2497,24 @@ func truncateToWidth(text string, width int) string {
 		return ""
 	}
 	return ansi.Cut(text, 0, width)
+}
+
+func formatBackgroundRuntime(runtimeSec float64) string {
+	if runtimeSec <= 0 {
+		return "0s"
+	}
+	total := int(runtimeSec + 0.5)
+	hours := total / 3600
+	minutes := (total % 3600) / 60
+	seconds := total % 60
+	switch {
+	case hours > 0:
+		return fmt.Sprintf("%dh%02dm", hours, minutes)
+	case minutes > 0:
+		return fmt.Sprintf("%dm%02ds", minutes, seconds)
+	default:
+		return fmt.Sprintf("%ds", seconds)
+	}
 }
 
 func maxInt(a, b int) int {

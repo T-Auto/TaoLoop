@@ -36,6 +36,9 @@ class ResourceMonitor:
         return self._snapshot_basic(pid)
 
     def format_snapshot(self, payload: dict[str, Any]) -> str:
+        return "; ".join(self.format_snapshot_lines(payload))
+
+    def format_snapshot_lines(self, payload: dict[str, Any]) -> list[str]:
         system = payload.get("system", {})
         process = payload.get("process", {})
         disk = payload.get("disk", {})
@@ -44,17 +47,26 @@ class ResourceMonitor:
             f"system_cpu={system.get('cpu_percent', 'n/a')}%",
             f"system_mem={system.get('memory_used_human', 'n/a')}/{system.get('memory_total_human', 'n/a')} ({system.get('memory_percent', 'n/a')}%)",
             f"process_pid={process.get('pid', 'n/a')}",
+            f"process_status={process.get('status', 'n/a')}",
             f"process_cpu={process.get('cpu_percent', 'n/a')}%",
             f"process_rss={process.get('rss_human', 'n/a')}",
             f"process_io={process.get('io_read_human', 'n/a')} read / {process.get('io_write_human', 'n/a')} write",
+            f"process_threads={process.get('threads', 'n/a')}",
+            f"process_children={process.get('children_count', 'n/a')}",
             f"disk_free={disk.get('free_human', 'n/a')}",
         ]
+        top_threads = process.get("top_threads", [])
+        if top_threads:
+            parts = []
+            for item in top_threads[:3]:
+                parts.append(f"tid={item.get('id', 'n/a')} cpu={item.get('cpu_time_sec', 'n/a')}s")
+            lines.append("thread_top=" + ", ".join(parts))
         if payload.get("gpu"):
             gpu = payload["gpu"]
             lines.append(
-                f"gpu={gpu.get('name', 'n/a')} util={gpu.get('utilization_percent', 'n/a')}% mem={gpu.get('memory_used_human', 'n/a')}/{gpu.get('memory_total_human', 'n/a')}"
+                f"gpu={gpu.get('name', 'n/a')} util={gpu.get('utilization_percent', 'n/a')}% mem={gpu.get('memory_used_human', 'n/a')}/{gpu.get('memory_total_human', 'n/a')} temp={gpu.get('temperature_c', 'n/a')}C"
             )
-        return "; ".join(lines)
+        return lines
 
     def _snapshot_psutil(self, pid: int | None = None) -> dict[str, Any]:
         assert psutil is not None
@@ -84,6 +96,7 @@ class ResourceMonitor:
                 write_bytes = 0
                 open_files = 0
                 threads = 0
+                top_threads: list[dict[str, Any]] = []
                 for item in processes:
                     with item.oneshot():
                         mem = item.memory_info()
@@ -100,8 +113,21 @@ class ResourceMonitor:
                         except Exception:
                             pass
                         threads += item.num_threads()
+                        try:
+                            for thread_info in item.threads():
+                                top_threads.append(
+                                    {
+                                        "process_pid": item.pid,
+                                        "id": thread_info.id,
+                                        "cpu_time_sec": round(thread_info.user_time + thread_info.system_time, 3),
+                                    }
+                                )
+                        except Exception:
+                            pass
+                top_threads.sort(key=lambda item: item["cpu_time_sec"], reverse=True)
                 process_payload = {
                     "pid": pid,
+                    "status": process.status(),
                     "cpu_percent": round(cpu_percent, 1),
                     "rss": rss,
                     "rss_human": _human_bytes(rss),
@@ -113,6 +139,8 @@ class ResourceMonitor:
                     "io_write_human": _human_bytes(write_bytes),
                     "open_files": open_files,
                     "threads": threads,
+                    "children_count": max(0, len(processes) - 1),
+                    "top_threads": top_threads[:5],
                 }
             except Exception as exc:
                 process_payload = {"pid": pid, "error": str(exc)}
@@ -149,10 +177,13 @@ class ResourceMonitor:
             },
             "process": {
                 "pid": pid,
+                "status": "n/a",
                 "cpu_percent": "n/a",
                 "rss_human": "n/a",
                 "io_read_human": "n/a",
                 "io_write_human": "n/a",
+                "threads": "n/a",
+                "children_count": "n/a",
             },
             "disk": {
                 "free_human": _human_bytes(disk_usage.free),

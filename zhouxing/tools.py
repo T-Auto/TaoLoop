@@ -11,12 +11,14 @@ import subprocess
 import time
 import uuid
 
+from .background_jobs import BackgroundJobManager
 from .config import Config
 from .logging_utils import FileLogger
 from .monitor import ResourceMonitor
 
 
 ToolEmitter = Callable[[dict[str, Any]], Awaitable[None] | None]
+SessionContextProvider = Callable[[], tuple[str | None, str]]
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 SEARCH_SKIP_DIR_NAMES = {".git", ".venv", ".zhouxing", "__pycache__"}
 BINARY_FILE_SUFFIXES = {
@@ -86,11 +88,15 @@ class ToolRegistry:
         config: Config,
         emit: ToolEmitter | None = None,
         logger: FileLogger | None = None,
+        background_jobs: BackgroundJobManager | None = None,
+        current_session: SessionContextProvider | None = None,
     ):
         self.config = config
         self.emit = emit
         self.logger = logger
         self.monitor = ResourceMonitor(config.sandbox_dir)
+        self.background_jobs = background_jobs
+        self.current_session = current_session
 
     def definitions(self) -> list[dict[str, Any]]:
         return [
@@ -196,7 +202,7 @@ class ToolRegistry:
                 "type": "function",
                 "function": {
                     "name": "run_command",
-                    "description": "Run a shell command inside sandbox and stream progress. Long-running jobs automatically report hardware heartbeats.",
+                    "description": "Run a short shell command inside sandbox and stream progress. Prefer this only for quick checks or commands that should finish soon.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -205,6 +211,52 @@ class ToolRegistry:
                             "timeout_sec": {"type": "integer"},
                         },
                         "required": ["command"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "start_background_command",
+                    "description": "Start a long-running simulation, training job, or script in the background without blocking the CLI. Use this whenever the command may run longer than roughly 10 seconds or the user wants to keep interacting.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "command": {"type": "string"},
+                            "cwd": {"type": "string"},
+                            "timeout_sec": {"type": "integer"},
+                        },
+                        "required": ["command"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_background_jobs",
+                    "description": "List background scripts currently running, or include recent finished jobs for inspection.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "session_id": {"type": "string"},
+                            "include_finished": {"type": "boolean"},
+                            "max_jobs": {"type": "integer"},
+                        },
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "inspect_background_job",
+                    "description": "Inspect one background script with recent log tail, hardware state, and runtime metadata.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "job_id": {"type": "string"},
+                            "tail_lines": {"type": "integer"},
+                        },
+                        "required": ["job_id"],
                     },
                 },
             },
@@ -233,6 +285,12 @@ class ToolRegistry:
             result = await self._replace_in_file(**arguments)
         elif name == "run_command":
             result = await self._run_command(event_cursor=event_cursor, **arguments)
+        elif name == "start_background_command":
+            result = await self._start_background_command(**arguments)
+        elif name == "list_background_jobs":
+            result = await self._list_background_jobs(**arguments)
+        elif name == "inspect_background_job":
+            result = await self._inspect_background_job(**arguments)
         else:
             raise ValueError(f"Unknown tool: {name}")
         if self.logger:
@@ -279,6 +337,24 @@ class ToolRegistry:
         if not any(self._is_within(candidate, root) for root in allowed_roots):
             raise ValueError(f"Path escapes allowed roots: {raw_path}")
         return candidate
+
+    def _current_session_context(self) -> tuple[str, str]:
+        if self.current_session is None:
+            raise RuntimeError("Current session context is unavailable.")
+        session_id, session_title = self.current_session()
+        if not session_id:
+            raise RuntimeError("No active session is loaded.")
+        return session_id, session_title
+
+    def _build_command_env(self) -> dict[str, str]:
+        env = os.environ.copy()
+        env["PYTHONUTF8"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
+        sandbox_bin = self.config.sandbox_python.parent
+        if sandbox_bin.exists():
+            env["VIRTUAL_ENV"] = str(self.config.sandbox_dir / ".venv")
+            env["PATH"] = f"{sandbox_bin}{os.pathsep}{env.get('PATH', '')}"
+        return env
 
     @staticmethod
     def _is_within(path: Path, root: Path) -> bool:
@@ -433,6 +509,27 @@ class ToolRegistry:
         target.write_text(updated, encoding="utf-8")
         return f"replaced {replacements} occurrence(s) in {target}"
 
+    def _format_background_job_brief(self, job: dict[str, Any]) -> list[str]:
+        lines = [
+            f"job_id={job.get('id', '')}",
+            f"session_id={job.get('session_id', '')}",
+            f"session_title={job.get('session_title', '')}",
+            f"command={job.get('command', '')}",
+            f"cwd={job.get('cwd', '')}",
+            f"status={job.get('status', '')}",
+            f"pid={job.get('pid', '')}",
+            f"runtime_sec={job.get('runtime_sec', 0)}",
+        ]
+        exit_code = job.get("exit_code")
+        if exit_code is not None:
+            lines.append(f"exit_code={exit_code}")
+        if job.get("timed_out"):
+            lines.append("timed_out=true")
+        last_log = job.get("last_log_line", "")
+        if last_log:
+            lines.append(f"last_log={last_log}")
+        return lines
+
     def _resolve_shell_command(self, command: str) -> tuple[list[str] | str, bool, str]:
         if os.name == "nt":
             shell_path = shutil.which("pwsh") or shutil.which("powershell") or shutil.which("powershell.exe")
@@ -470,13 +567,7 @@ class ToolRegistry:
         event_cursor: ToolEventCursor | None = None,
     ) -> str:
         target_cwd = self._resolve_path(cwd)
-        env = os.environ.copy()
-        env["PYTHONUTF8"] = "1"
-        env["PYTHONIOENCODING"] = "utf-8"
-        sandbox_scripts = self.config.sandbox_dir / ".venv" / "Scripts"
-        if sandbox_scripts.exists():
-            env["VIRTUAL_ENV"] = str(self.config.sandbox_dir / ".venv")
-            env["PATH"] = f"{sandbox_scripts}{os.pathsep}{env.get('PATH', '')}"
+        env = self._build_command_env()
 
         await self._emit(
             {
@@ -638,6 +729,103 @@ class ToolRegistry:
             stderr_text or "(empty)",
         ]
         return "\n".join(summary)
+
+    async def _start_background_command(
+        self,
+        command: str,
+        cwd: str = ".",
+        timeout_sec: int = 0,
+    ) -> str:
+        if self.background_jobs is None:
+            raise RuntimeError("Background job manager is unavailable.")
+        session_id, session_title = self._current_session_context()
+        target_cwd = self._resolve_path(cwd)
+        env = self._build_command_env()
+        popen_command, use_shell, encoding = self._resolve_shell_command(command)
+        job = await self.background_jobs.start_process(
+            session_id=session_id,
+            session_title=session_title,
+            command=command,
+            cwd=target_cwd,
+            env=env,
+            popen_command=popen_command,
+            use_shell=use_shell,
+            encoding=encoding,
+            timeout_sec=timeout_sec,
+        )
+        summary = [
+            f"job_id={job.id}",
+            f"command={job.command}",
+            f"cwd={job.cwd}",
+            f"status={job.status}",
+            f"pid={job.pid}",
+            f"started_at={job.started_at}",
+            f"monitor_schedule_sec={','.join(str(item) for item in job.monitor_schedule)}",
+            f"timed_out={job.timed_out}",
+            "started_in_background=true",
+            "hint=list_background_jobs / inspect_background_job",
+        ]
+        return "\n".join(summary)
+
+    async def _list_background_jobs(
+        self,
+        session_id: str | None = None,
+        include_finished: bool = False,
+        max_jobs: int = 12,
+    ) -> str:
+        if self.background_jobs is None:
+            raise RuntimeError("Background job manager is unavailable.")
+        scoped_session_id = session_id
+        if scoped_session_id is None and self.current_session is not None:
+            scoped_session_id, _ = self.current_session()
+        jobs = await self.background_jobs.list_jobs(
+            session_id=scoped_session_id,
+            include_finished=include_finished,
+            max_jobs=max_jobs,
+        )
+        header = "Background jobs:"
+        if not jobs:
+            return header + "\n(no jobs)"
+        blocks = [header]
+        for job in jobs:
+            blocks.extend(self._format_background_job_brief(job))
+            blocks.append("---")
+        return "\n".join(blocks[:-1])
+
+    async def _inspect_background_job(
+        self,
+        job_id: str,
+        tail_lines: int = 10,
+    ) -> str:
+        if self.background_jobs is None:
+            raise RuntimeError("Background job manager is unavailable.")
+        job = await self.background_jobs.get_job(job_id)
+        if job is None:
+            raise ValueError(f"background job not found: {job_id}")
+        lines = [
+            f"job_id={job.id}",
+            f"session_id={job.session_id}",
+            f"session_title={job.session_title}",
+            f"command={job.command}",
+            f"cwd={job.cwd}",
+            f"status={job.status}",
+            f"pid={job.pid}",
+            f"started_at={job.started_at}",
+            f"runtime_sec={job.runtime_sec()}",
+        ]
+        if job.exit_code is not None:
+            lines.append(f"exit_code={job.exit_code}")
+        lines.append(f"timed_out={job.timed_out}")
+        lines.append("recent_logs:")
+        tail = job.tail_lines(limit=max(1, tail_lines))
+        if tail:
+            lines.extend(tail)
+        else:
+            lines.append("(empty)")
+        lines.append("hardware:")
+        snapshot = job.last_snapshot or self.monitor.snapshot(job.pid if job.status == "running" else None)
+        lines.extend(self.monitor.format_snapshot_lines(snapshot))
+        return "\n".join(lines)
 
     async def _terminate_process_tree(self, pid: int) -> None:
         if os.name == "nt":

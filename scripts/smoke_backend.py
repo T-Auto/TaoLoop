@@ -11,9 +11,23 @@ from threading import Thread
 
 
 ROOT = Path(__file__).resolve().parent.parent
-PYTHON = ROOT / ".venv" / "Scripts" / "python.exe"
 SANDBOX = ROOT / "sandbox"
 SMOKE_SCRIPT = SANDBOX / "smoke_long_sim.py"
+
+
+def resolve_backend_python() -> Path:
+    candidates = [
+        ROOT / ".venv" / "Scripts" / "python.exe",
+        ROOT / ".venv" / "bin" / "python",
+        ROOT / ".venv" / "bin" / "python3",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(f"backend python not found in {candidates}")
+
+
+PYTHON = resolve_backend_python()
 
 SMOKE_LONG_SIM = """from __future__ import annotations
 

@@ -5,7 +5,16 @@ from pathlib import Path
 import os
 
 
-DEFAULT_MONITOR_INTERVALS = (20, 60, 180, 600, 1800, 7200, 18000, 36000)
+DEFAULT_MONITOR_INTERVALS = (20, 60, 180, 600, 1800, 7200, 18000, 36000, 72000, 108000)
+DEFAULT_MONITOR_REPEAT_INTERVAL_SEC = 36000
+
+
+def _venv_bin_dir(venv_root: Path) -> Path:
+    return venv_root / ("Scripts" if os.name == "nt" else "bin")
+
+
+def _venv_python_path(venv_root: Path) -> Path:
+    return _venv_bin_dir(venv_root) / ("python.exe" if os.name == "nt" else "python")
 
 
 def _load_dotenv(path: Path) -> None:
@@ -45,6 +54,7 @@ class Config:
     request_retry_base_delay_sec: float
     max_tool_rounds: int
     monitor_intervals: tuple[int, ...]
+    monitor_repeat_interval_sec: int
     sandbox_python: Path
     backend_python: Path
 
@@ -61,8 +71,8 @@ class Config:
         state_dir.mkdir(parents=True, exist_ok=True)
         sessions_dir.mkdir(parents=True, exist_ok=True)
 
-        sandbox_python = sandbox_dir / ".venv" / "Scripts" / "python.exe"
-        backend_python = root / ".venv" / "Scripts" / "python.exe"
+        sandbox_python = _venv_python_path(sandbox_dir / ".venv")
+        backend_python = _venv_python_path(root / ".venv")
 
         return cls(
             root_dir=root,
@@ -80,6 +90,9 @@ class Config:
             request_retry_base_delay_sec=float(os.getenv("ZHOUXING_REQUEST_RETRY_BASE_DELAY_SEC", "1.5")),
             max_tool_rounds=int(os.getenv("ZHOUXING_MAX_TOOL_ROUNDS", "12")),
             monitor_intervals=DEFAULT_MONITOR_INTERVALS,
+            monitor_repeat_interval_sec=int(
+                os.getenv("ZHOUXING_MONITOR_REPEAT_INTERVAL_SEC", str(DEFAULT_MONITOR_REPEAT_INTERVAL_SEC))
+            ),
             sandbox_python=sandbox_python,
             backend_python=backend_python,
         )

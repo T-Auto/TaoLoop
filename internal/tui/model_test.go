@@ -79,6 +79,47 @@ func TestToolMessageCanFollowSyntheticToolEvent(t *testing.T) {
 	})
 }
 
+func TestMessageFromAnotherSessionIsIgnored(t *testing.T) {
+	m := Model{
+		viewport: viewport.New(80, 20),
+		activeSession: &SessionRecord{
+			ID: "session_active",
+			Messages: []ChatMessage{
+				{ID: "assistant_1", Role: "assistant", Content: "当前会话"},
+			},
+		},
+	}
+
+	foreign := ChatMessage{ID: "foreign_event", Role: "event", Content: "其他会话后台消息"}
+	m.applyEvent(Event{Type: "message", SessionID: "session_other", Message: &foreign})
+
+	assertMessageOrder(t, m.activeSession.Messages, []string{"assistant_1"})
+}
+
+func TestJobsEventRendersRunningScriptsBelowInput(t *testing.T) {
+	m := newChatModelForLayoutTest()
+	m.width = 90
+	m.height = 20
+	m.jobs = []BackgroundJob{
+		{
+			ID:          "job_1",
+			Command:     "python physics_sim_test.py",
+			PID:         4321,
+			Status:      "running",
+			RuntimeSec:  42,
+			LastLogLine: "[physics-sim] elapsed=40.0s checkpoint=40s",
+		},
+	}
+	m.updateLayout()
+
+	view := ansi.Strip(m.View())
+	for _, want := range []string{"后台脚本 1 个", "python physics_sim_test.py", "pid=4321"} {
+		if !contains(view, want) {
+			t.Fatalf("expected running jobs section to contain %q: %s", want, view)
+		}
+	}
+}
+
 func TestSessionPickerViewShowsShortcutHints(t *testing.T) {
 	m := Model{
 		mode:   modeSessionPicker,

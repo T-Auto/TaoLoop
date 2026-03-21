@@ -248,6 +248,45 @@ class MockClient:
         calls: list[ToolCall] = []
         lowered = text.lower()
 
+        if (
+            "测试阶段" in text
+            and "40秒" in text
+            and "python" in lowered
+            and ("物理实验" in text or "仿真" in text)
+        ):
+            calls.append(
+                ToolCall(
+                    id="mock_write_async_test_script",
+                    name="write_file",
+                    arguments={
+                        "path": "physics_sim_test.py",
+                        "content": self._build_async_test_script(),
+                    },
+                )
+            )
+            calls.append(
+                ToolCall(
+                    id="mock_start_async_test_script",
+                    name="start_background_command",
+                    arguments={
+                        "command": "python physics_sim_test.py",
+                        "cwd": ".",
+                        "timeout_sec": 0,
+                    },
+                )
+            )
+            return calls
+
+        if any(keyword in text for keyword in ("后台脚本", "后台任务", "正在运行的脚本", "running scripts")):
+            calls.append(
+                ToolCall(
+                    id="mock_list_background_jobs",
+                    name="list_background_jobs",
+                    arguments={"include_finished": True, "max_jobs": 10},
+                )
+            )
+            return calls
+
         if any(keyword in text for keyword in ("目录", "列出", "list", "files")):
             calls.append(
                 ToolCall(
@@ -294,6 +333,44 @@ class MockClient:
                 )
             )
         return calls
+
+    @staticmethod
+    def _build_async_test_script() -> str:
+        return """from __future__ import annotations
+
+import json
+import time
+from pathlib import Path
+
+
+def main() -> int:
+    started = time.perf_counter()
+    checkpoints = [10, 20, 30, 40]
+    for checkpoint in checkpoints:
+        while time.perf_counter() - started < checkpoint:
+            time.sleep(0.2)
+        elapsed = time.perf_counter() - started
+        print(
+            f"[physics-sim] elapsed={elapsed:4.1f}s checkpoint={checkpoint}s energy={(checkpoint * 1.618):.3f}",
+            flush=True,
+        )
+    result = {
+        "target_seconds": 40,
+        "elapsed_seconds": round(time.perf_counter() - started, 3),
+        "status": "completed",
+    }
+    Path("physics_sim_test_result.json").write_text(
+        json.dumps(result, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    print("simulation complete", flush=True)
+    print(json.dumps(result, ensure_ascii=False), flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+"""
 
 
 def build_client(config: Config, logger: FileLogger | None = None) -> DeepSeekClient | MockClient:

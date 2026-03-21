@@ -11,7 +11,21 @@ from threading import Thread
 
 
 ROOT = Path(__file__).resolve().parent.parent
-PYTHON = ROOT / ".venv" / "Scripts" / "python.exe"
+
+
+def resolve_backend_python() -> Path:
+    candidates = [
+        ROOT / ".venv" / "Scripts" / "python.exe",
+        ROOT / ".venv" / "bin" / "python",
+        ROOT / ".venv" / "bin" / "python3",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(f"backend python not found in {candidates}")
+
+
+PYTHON = resolve_backend_python()
 
 
 def send(handle, payload: dict) -> None:

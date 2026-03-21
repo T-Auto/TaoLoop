@@ -56,10 +56,28 @@ type ContextUsage struct {
 	UsageRatio   float64 `json:"usage_ratio"`
 }
 
+type BackgroundJob struct {
+	ID               string  `json:"id"`
+	SessionID        string  `json:"session_id"`
+	SessionTitle     string  `json:"session_title"`
+	Command          string  `json:"command"`
+	CWD              string  `json:"cwd"`
+	PID              int     `json:"pid"`
+	Status           string  `json:"status"`
+	StartedAt        string  `json:"started_at"`
+	RuntimeSec       float64 `json:"runtime_sec"`
+	TimeoutSec       int     `json:"timeout_sec"`
+	TimedOut         bool    `json:"timed_out"`
+	ExitCode         *int    `json:"exit_code"`
+	LastHeartbeatSec int     `json:"last_heartbeat_sec"`
+	LastLogLine      string  `json:"last_log_line"`
+}
+
 type StatusPayload struct {
 	Phase       string       `json:"phase"`
 	Busy        bool         `json:"busy"`
 	QueueLength int          `json:"queue_length"`
+	RunningJobs int          `json:"running_jobs"`
 	Model       string       `json:"model"`
 	OfflineMode bool         `json:"offline_mode"`
 	SessionID   string       `json:"session_id"`
@@ -95,6 +113,7 @@ type ToolEvent struct {
 
 type Event struct {
 	Type           string
+	SessionID      string
 	Ready          *ReadyPayload
 	Sessions       []SessionSummary
 	Session        *SessionRecord
@@ -103,6 +122,7 @@ type Event struct {
 	Status         *StatusPayload
 	Progress       *ProgressPayload
 	Tool           *ToolEvent
+	Jobs           []BackgroundJob
 	Error          string
 	Stderr         string
 }
@@ -119,9 +139,20 @@ type BackendClient struct {
 }
 
 func StartBackend(rootDir string) (*BackendClient, error) {
-	pythonPath := filepath.Join(rootDir, ".venv", "Scripts", "python.exe")
-	if _, err := os.Stat(pythonPath); err != nil {
-		return nil, fmt.Errorf("backend python not found at %s", pythonPath)
+	candidates := []string{
+		filepath.Join(rootDir, ".venv", "Scripts", "python.exe"),
+		filepath.Join(rootDir, ".venv", "bin", "python"),
+		filepath.Join(rootDir, ".venv", "bin", "python3"),
+	}
+	pythonPath := ""
+	for _, candidate := range candidates {
+		if _, err := os.Stat(candidate); err == nil {
+			pythonPath = candidate
+			break
+		}
+	}
+	if pythonPath == "" {
+		return nil, fmt.Errorf("backend python not found in %v", candidates)
 	}
 
 	cmd := exec.Command(pythonPath, "-X", "utf8", "-m", "zhouxing.backend")
@@ -269,6 +300,7 @@ func parseEvent(line []byte) (Event, error) {
 	case "message":
 		var payload struct {
 			Type           string      `json:"type"`
+			SessionID      string      `json:"session_id"`
 			Message        ChatMessage `json:"message"`
 			AfterMessageID string      `json:"after_message_id"`
 		}
@@ -277,6 +309,7 @@ func parseEvent(line []byte) (Event, error) {
 		}
 		return Event{
 			Type:           payload.Type,
+			SessionID:      payload.SessionID,
 			Message:        &payload.Message,
 			AfterMessageID: payload.AfterMessageID,
 		}, nil
@@ -289,6 +322,15 @@ func parseEvent(line []byte) (Event, error) {
 			return Event{}, err
 		}
 		return Event{Type: payload.Type, Status: &payload.StatusPayload}, nil
+	case "jobs":
+		var payload struct {
+			Type string          `json:"type"`
+			Jobs []BackgroundJob `json:"jobs"`
+		}
+		if err := json.Unmarshal(line, &payload); err != nil {
+			return Event{}, err
+		}
+		return Event{Type: payload.Type, Jobs: payload.Jobs}, nil
 	case "progress":
 		var payload struct {
 			Type string `json:"type"`
