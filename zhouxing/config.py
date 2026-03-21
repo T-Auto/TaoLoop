@@ -3,10 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import os
+import re
 
 
 DEFAULT_MONITOR_INTERVALS = (20, 60, 180, 600, 1800, 7200, 18000, 36000, 72000, 108000)
 DEFAULT_MONITOR_REPEAT_INTERVAL_SEC = 36000
+DEFAULT_AUTONOMOUS_RUN_LIMIT_SEC = 1800
 
 
 def _venv_bin_dir(venv_root: Path) -> Path:
@@ -37,6 +39,41 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _parse_autonomous_run_limit(raw_value: str | None) -> int:
+    value = (raw_value or "30min").strip().lower()
+    if not value:
+        return DEFAULT_AUTONOMOUS_RUN_LIMIT_SEC
+    if value in {"0", "none", "unlimited", "infinite", "inf"}:
+        return 0
+    if value.isdigit():
+        return max(0, int(value))
+
+    match = re.fullmatch(r"(\d+)\s*(s|sec|secs|m|min|mins|h|hr|hrs|d|day|days)", value)
+    if match is None:
+        raise ValueError(
+            "ZHOUXING_AUTONOMOUS_RUN_LIMIT must be an integer second count or one of "
+            "10min/30min/1h/24h/unlimited."
+        )
+
+    amount = int(match.group(1))
+    unit = match.group(2)
+    multiplier = {
+        "s": 1,
+        "sec": 1,
+        "secs": 1,
+        "m": 60,
+        "min": 60,
+        "mins": 60,
+        "h": 3600,
+        "hr": 3600,
+        "hrs": 3600,
+        "d": 86400,
+        "day": 86400,
+        "days": 86400,
+    }[unit]
+    return max(0, amount * multiplier)
+
+
 @dataclass(slots=True)
 class Config:
     root_dir: Path
@@ -52,7 +89,7 @@ class Config:
     request_timeout_sec: int
     request_retries: int
     request_retry_base_delay_sec: float
-    max_tool_rounds: int
+    autonomous_run_limit_sec: int
     monitor_intervals: tuple[int, ...]
     monitor_repeat_interval_sec: int
     sandbox_python: Path
@@ -88,7 +125,7 @@ class Config:
             request_timeout_sec=int(os.getenv("ZHOUXING_REQUEST_TIMEOUT_SEC", "180")),
             request_retries=int(os.getenv("ZHOUXING_REQUEST_RETRIES", "3")),
             request_retry_base_delay_sec=float(os.getenv("ZHOUXING_REQUEST_RETRY_BASE_DELAY_SEC", "1.5")),
-            max_tool_rounds=int(os.getenv("ZHOUXING_MAX_TOOL_ROUNDS", "12")),
+            autonomous_run_limit_sec=_parse_autonomous_run_limit(os.getenv("ZHOUXING_AUTONOMOUS_RUN_LIMIT")),
             monitor_intervals=DEFAULT_MONITOR_INTERVALS,
             monitor_repeat_interval_sec=int(
                 os.getenv("ZHOUXING_MONITOR_REPEAT_INTERVAL_SEC", str(DEFAULT_MONITOR_REPEAT_INTERVAL_SEC))

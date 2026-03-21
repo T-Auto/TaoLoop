@@ -367,7 +367,6 @@ func TestCollapsedRunCommandLogGroupsStreamingOutput(t *testing.T) {
 					Phase:       "finish",
 					ExitCode:    0,
 					DurationSec: 1.25,
-					Summary:     "cpu 12%",
 				}, 6),
 				{
 					ID:      "tool_result",
@@ -382,14 +381,9 @@ func TestCollapsedRunCommandLogGroupsStreamingOutput(t *testing.T) {
 	m.rebuildViewport(true)
 	view := ansi.Strip(m.viewport.View())
 
-	for _, want := range []string{"• Ran go test ./...", "stdout one", "stdout four", "exit=0 | duration=1.25s | cpu 12%", "… +2 lines"} {
+	for _, want := range []string{"• Ran go test ./...", "stdout one", "stdout two", "stdout three", "stdout four", "exit=0 | duration=1.25s"} {
 		if !contains(view, want) {
 			t.Fatalf("collapsed run command log missing %q: %s", want, view)
-		}
-	}
-	for _, hidden := range []string{"stdout two", "stdout three"} {
-		if contains(view, hidden) {
-			t.Fatalf("expected collapsed run command log to hide %q: %s", hidden, view)
 		}
 	}
 }
@@ -426,17 +420,13 @@ func TestCollapsedStandaloneReadFileToolMessage(t *testing.T) {
 		"• Read D:\\Auto\\research\\Astronomy\\ZhouXing\\internal\\tui\\model.go lines 1-6",
 		"   1: package tui",
 		"   2: import (",
+		"   3: \"fmt\"",
+		"   4: \"strings\"",
 		"   5: \"time\"",
 		"   6: )",
-		"… +2 lines",
 	} {
 		if !contains(view, want) {
 			t.Fatalf("collapsed read_file log missing %q: %s", want, view)
-		}
-	}
-	for _, hidden := range []string{"   3: \"fmt\"", "   4: \"strings\""} {
-		if contains(view, hidden) {
-			t.Fatalf("expected collapsed read_file log to hide %q: %s", hidden, view)
 		}
 	}
 }
@@ -539,7 +529,7 @@ func TestBuildPendingTranscriptPrintTextPrintsCollapsedTranscript(t *testing.T) 
 
 	printed := m.buildPendingTranscriptPrintText(true)
 
-	for _, want := range []string{"> 请读取配置", "• Read D:\\Auto\\research\\Astronomy\\ZhouXing\\README.md lines 1-5", "… +1 lines", "已经读取完成。"} {
+	for _, want := range []string{"> 请读取配置", "• Read D:\\Auto\\research\\Astronomy\\ZhouXing\\README.md lines 1-5", "   1: # 周行", "   5: 结束", "已经读取完成。"} {
 		if !contains(printed, want) {
 			t.Fatalf("printed transcript missing %q: %s", want, printed)
 		}

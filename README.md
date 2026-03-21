@@ -41,3 +41,5 @@ start_zhouxing.bat     启动脚本
 示例环境变量见 `.env.example`。
 
 聊天界面现在运行在普通终端模式：历史消息直接进入终端 scrollback，底部只保留状态和输入区。输入时建议使用 `Ctrl+V` 或 `Insert` 从系统剪贴板粘贴，也可以按 `Ctrl+Y` 或 `F5` 将当前会话全文复制到系统剪贴板。
+
+后台任务采用“待机唤醒”模式：启动 `start_background_command` 后，当前自主轮次会立即挂起，等待用户新输入或后续后台事件；默认连续自主运行时间窗口为 `30min`，可通过 `ZHOUXING_AUTONOMOUS_RUN_LIMIT=10min|30min|1h|24h|unlimited` 调整。

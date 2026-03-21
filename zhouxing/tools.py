@@ -202,7 +202,7 @@ class ToolRegistry:
                 "type": "function",
                 "function": {
                     "name": "run_command",
-                    "description": "Run a short shell command inside sandbox and stream progress. Prefer this only for quick checks or commands that should finish soon.",
+                    "description": "Run a short shell command and stream progress. Prefer quick checks only; use cwd instead of embedding cd, keep commands shell-compatible with the current OS, use root-level uv/.venv for Python and dependency commands instead of system python or pip, and if the target script already lives in sandbox then prefer cwd=sandbox:. with a relative filename.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -218,7 +218,7 @@ class ToolRegistry:
                 "type": "function",
                 "function": {
                     "name": "start_background_command",
-                    "description": "Start a long-running simulation, training job, or script in the background without blocking the CLI. Use this whenever the command may run longer than roughly 10 seconds or the user wants to keep interacting.",
+                    "description": "Start a long-running simulation, training job, or script in the background without blocking the CLI. Use cwd instead of embedding cd, prefer this whenever runtime may exceed roughly 10 seconds, when launching Python in this project prefer the root uv/.venv environment over system python, and for scripts under sandbox prefer cwd=sandbox:. with a relative filename like `uv run python physics_simulation.py`.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -346,15 +346,57 @@ class ToolRegistry:
             raise RuntimeError("No active session is loaded.")
         return session_id, session_title
 
-    def _build_command_env(self) -> dict[str, str]:
+    def _build_command_env(self, command: str = "", *, cwd: Path | None = None) -> dict[str, str]:
         env = os.environ.copy()
         env["PYTHONUTF8"] = "1"
         env["PYTHONIOENCODING"] = "utf-8"
-        sandbox_bin = self.config.sandbox_python.parent
-        if sandbox_bin.exists():
-            env["VIRTUAL_ENV"] = str(self.config.sandbox_dir / ".venv")
-            env["PATH"] = f"{sandbox_bin}{os.pathsep}{env.get('PATH', '')}"
+        venv_root = self.config.sandbox_dir / ".venv"
+        venv_bin = self.config.sandbox_python.parent
+        if cwd is not None and not self._is_within(cwd, self.config.sandbox_dir):
+            venv_root = self.config.root_dir / ".venv"
+            venv_bin = self.config.backend_python.parent
+        if venv_bin.exists():
+            env["PATH"] = f"{venv_bin}{os.pathsep}{env.get('PATH', '')}"
+            if self._command_mentions_uv(command):
+                env.pop("VIRTUAL_ENV", None)
+                env.pop("VIRTUAL_ENV_PROMPT", None)
+            else:
+                env["VIRTUAL_ENV"] = str(venv_root)
         return env
+
+    @staticmethod
+    def _is_python_command(command: str) -> bool:
+        lowered = command.lower()
+        return bool(
+            ".py" in lowered
+            and (
+                "uv run python" in lowered
+                or "uv run python.exe" in lowered
+                or "python " in lowered
+                or "python.exe" in lowered
+            )
+        )
+
+    @staticmethod
+    def _command_mentions_uv(command: str) -> bool:
+        return bool(re.search(r"(^|[;&|()\s])uv(?:\.exe)?(\s|$)", command.lower()))
+
+    @staticmethod
+    def _infer_run_timeout_sec(command: str, timeout_sec: int) -> int:
+        if timeout_sec > 0:
+            return timeout_sec
+        lowered = command.lower()
+        if "--help" in lowered and ToolRegistry._is_python_command(command):
+            return 15
+        return 0
+
+    @staticmethod
+    def _normalize_background_timeout_sec(command: str, timeout_sec: int) -> int:
+        if timeout_sec <= 0:
+            return 0
+        if ToolRegistry._is_python_command(command) and timeout_sec <= 30:
+            return 0
+        return timeout_sec
 
     @staticmethod
     def _is_within(path: Path, root: Path) -> bool:
@@ -567,7 +609,8 @@ class ToolRegistry:
         event_cursor: ToolEventCursor | None = None,
     ) -> str:
         target_cwd = self._resolve_path(cwd)
-        env = self._build_command_env()
+        env = self._build_command_env(command, cwd=target_cwd)
+        effective_timeout_sec = self._infer_run_timeout_sec(command, timeout_sec)
 
         await self._emit(
             {
@@ -645,15 +688,12 @@ class ToolRegistry:
                     await asyncio.sleep(wait_time)
                 if process.poll() is not None:
                     return
-                snapshot = await asyncio.to_thread(self.monitor.snapshot, process.pid)
                 await self._emit(
                     {
                         "type": "tool_event",
                         "tool": "run_command",
                         "phase": "heartbeat",
                         "after_sec": interval,
-                        "snapshot": snapshot,
-                        "summary": self.monitor.format_snapshot(snapshot),
                     },
                     event_cursor=event_cursor,
                 )
@@ -664,9 +704,9 @@ class ToolRegistry:
 
         timed_out = False
         try:
-            if timeout_sec and timeout_sec > 0:
+            if effective_timeout_sec > 0:
                 while process.poll() is None:
-                    if time.monotonic() - start_time >= timeout_sec:
+                    if time.monotonic() - start_time >= effective_timeout_sec:
                         raise TimeoutError
                     await asyncio.sleep(0.2)
             else:
@@ -678,7 +718,7 @@ class ToolRegistry:
                     "type": "tool_event",
                     "tool": "run_command",
                     "phase": "timeout",
-                    "timeout_sec": timeout_sec,
+                    "timeout_sec": effective_timeout_sec,
                     "pid": process.pid,
                 },
                 event_cursor=event_cursor,
@@ -699,7 +739,6 @@ class ToolRegistry:
                 process.stderr.close()
 
         duration = round(time.monotonic() - start_time, 2)
-        final_snapshot = await asyncio.to_thread(self.monitor.snapshot, process.pid)
         await self._emit(
             {
                 "type": "tool_event",
@@ -708,8 +747,6 @@ class ToolRegistry:
                 "exit_code": process.returncode,
                 "duration_sec": duration,
                 "timed_out": timed_out,
-                "snapshot": final_snapshot,
-                "summary": self.monitor.format_snapshot(final_snapshot),
             },
             event_cursor=event_cursor,
         )
@@ -722,7 +759,7 @@ class ToolRegistry:
             f"exit_code={process.returncode}",
             f"duration_sec={duration}",
             f"timed_out={timed_out}",
-            f"resources={self.monitor.format_snapshot(final_snapshot)}",
+            f"timeout_sec={effective_timeout_sec}",
             "stdout_tail:",
             stdout_text or "(empty)",
             "stderr_tail:",
@@ -740,8 +777,9 @@ class ToolRegistry:
             raise RuntimeError("Background job manager is unavailable.")
         session_id, session_title = self._current_session_context()
         target_cwd = self._resolve_path(cwd)
-        env = self._build_command_env()
+        env = self._build_command_env(command, cwd=target_cwd)
         popen_command, use_shell, encoding = self._resolve_shell_command(command)
+        effective_timeout_sec = self._normalize_background_timeout_sec(command, timeout_sec)
         job = await self.background_jobs.start_process(
             session_id=session_id,
             session_title=session_title,
@@ -751,7 +789,7 @@ class ToolRegistry:
             popen_command=popen_command,
             use_shell=use_shell,
             encoding=encoding,
-            timeout_sec=timeout_sec,
+            timeout_sec=effective_timeout_sec,
         )
         summary = [
             f"job_id={job.id}",
@@ -761,10 +799,13 @@ class ToolRegistry:
             f"pid={job.pid}",
             f"started_at={job.started_at}",
             f"monitor_schedule_sec={','.join(str(item) for item in job.monitor_schedule)}",
+            f"timeout_sec={job.timeout_sec}",
             f"timed_out={job.timed_out}",
             "started_in_background=true",
             "hint=list_background_jobs / inspect_background_job",
         ]
+        if effective_timeout_sec != timeout_sec and timeout_sec > 0:
+            summary.append(f"requested_timeout_sec={timeout_sec}")
         return "\n".join(summary)
 
     async def _list_background_jobs(

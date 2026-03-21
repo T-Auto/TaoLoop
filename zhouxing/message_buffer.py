@@ -23,6 +23,13 @@ class BufferedSessionMessage:
     def is_user(self) -> bool:
         return self.priority == 0
 
+    @property
+    def coalesce_key(self) -> str:
+        if not self.meta:
+            return ""
+        value = self.meta.get("coalesce_key", "")
+        return value if isinstance(value, str) else ""
+
 
 @dataclass(slots=True)
 class FlushResult:
@@ -84,6 +91,20 @@ class MessageBufferQueue:
     ) -> BufferedSessionMessage:
         async with self._lock:
             self._sequence += 1
+            dropped = 0
+            if meta and isinstance(meta.get("coalesce_key"), str) and meta["coalesce_key"]:
+                coalesce_key = meta["coalesce_key"]
+                kept_items: list[BufferedSessionMessage] = []
+                for existing in self._items:
+                    if (
+                        existing.session_id == session_id
+                        and existing.priority == priority
+                        and existing.coalesce_key == coalesce_key
+                    ):
+                        dropped += 1
+                        continue
+                    kept_items.append(existing)
+                self._items = kept_items
             item = BufferedSessionMessage(
                 session_id=session_id,
                 message=message,
@@ -101,6 +122,8 @@ class MessageBufferQueue:
                     role=message.role,
                     priority=priority,
                     after_message_id=after_message_id,
+                    coalesce_key=meta.get("coalesce_key") if meta else "",
+                    coalesced_items=dropped,
                 )
             return item
 

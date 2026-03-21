@@ -90,9 +90,21 @@ class BackendServer:
             await self._flush_message_buffer()
 
     async def _enqueue_background_message(self, session_id: str, message: ChatMessage) -> None:
-        await self.message_buffer.put_event(session_id, message)
+        await self.message_buffer.put_event(
+            session_id,
+            message,
+            meta=self._background_buffer_meta(message),
+        )
         if not self.busy:
             await self._flush_message_buffer()
+
+    @staticmethod
+    def _background_buffer_meta(message: ChatMessage) -> dict[str, Any] | None:
+        phase = message.meta.get("background_job_phase")
+        job_id = message.meta.get("background_job_id")
+        if phase == "heartbeat" and isinstance(job_id, str) and job_id:
+            return {"coalesce_key": f"background-heartbeat:{job_id}"}
+        return None
 
     async def _flush_message_buffer(self) -> None:
         result = await self.message_buffer.flush(self._deliver_buffered_message)
@@ -119,6 +131,51 @@ class BackendServer:
                 "after_message_id": item.after_message_id,
             }
         )
+        if self._should_schedule_background_followup(session, item.message):
+            await self._queue_background_followup(session, item.message)
+
+    def _should_schedule_background_followup(self, session: SessionRecord, message: ChatMessage) -> bool:
+        if message.role != "event":
+            return False
+        if message.meta.get("background_job_phase") != "finish":
+            return False
+        runtime_state = session.meta.get("runtime_state", {})
+        if runtime_state.get("phase") != "sleeping":
+            return False
+        if runtime_state.get("reason") != "background_job_started":
+            return False
+        if self.active_session is not None and self.active_session.id != session.id:
+            return False
+        return True
+
+    async def _queue_background_followup(self, session: SessionRecord, message: ChatMessage) -> None:
+        session.meta["runtime_state"] = {
+            "phase": "wakeup_pending",
+            "reason": "background_job_finish",
+            "trigger_message_id": message.id,
+            "background_job_id": message.meta.get("background_job_id"),
+            "background_job_status": message.meta.get("background_job_status"),
+        }
+        self.store.save(session)
+        if self.active_session is not None and self.active_session.id == session.id:
+            self.active_session = session
+        await self.user_queue.put(
+            {
+                "session_id": session.id,
+                "message_id": message.id,
+                "source": "background_event",
+            }
+        )
+        if self.logger:
+            self.logger.log(
+                "backend_background_followup_queued",
+                session_id=session.id,
+                message_id=message.id,
+                background_job_id=message.meta.get("background_job_id"),
+                background_job_status=message.meta.get("background_job_status"),
+            )
+        if not self.busy:
+            await self._emit_status("wakeup_pending")
 
     async def _emit_jobs_changed(self, jobs: list[dict[str, Any]]) -> None:
         await self.emit({"type": "jobs", "jobs": jobs})
@@ -329,6 +386,8 @@ class BackendServer:
             context = self.active_session.meta.get("context", {})
         running_jobs = await self.background_jobs.list_jobs(include_finished=False, max_jobs=200)
         buffered_messages = await self.message_buffer.size()
+        if phase == "idle" and running_jobs:
+            phase = "sleeping"
         await self.emit(
             {
                 "type": "status",

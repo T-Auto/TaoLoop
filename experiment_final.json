@@ -1,0 +1,521 @@
+{
+  "start_time": "2026-03-21T14:17:28.938545",
+  "total_duration_seconds": 300,
+  "log_interval_seconds": 10,
+  "iterations": [
+    {
+      "iteration": 1,
+      "temperature_k": 295.52,
+      "pressure_atm": 1.078,
+      "magnetic_field_t": 0.4947,
+      "computation_result": 0.503734,
+      "progress_percent": 3.3
+    },
+    {
+      "iteration": 2,
+      "temperature_k": 297.68,
+      "pressure_atm": 1.069,
+      "magnetic_field_t": 0.4918,
+      "computation_result": 0.497222,
+      "progress_percent": 6.7
+    },
+    {
+      "iteration": 3,
+      "temperature_k": 303.4,
+      "pressure_atm": 0.911,
+      "magnetic_field_t": 0.4511,
+      "computation_result": 0.493641,
+      "progress_percent": 10.0
+    },
+    {
+      "iteration": 4,
+      "temperature_k": 298.5,
+      "pressure_atm": 0.998,
+      "magnetic_field_t": 0.5253,
+      "computation_result": 0.498551,
+      "progress_percent": 13.3
+    },
+    {
+      "iteration": 5,
+      "temperature_k": 302.13,
+      "pressure_atm": 1.045,
+      "magnetic_field_t": 0.4526,
+      "computation_result": 0.496974,
+      "progress_percent": 16.7
+    },
+    {
+      "iteration": 6,
+      "temperature_k": 297.49,
+      "pressure_atm": 1.029,
+      "magnetic_field_t": 0.548,
+      "computation_result": 0.496558,
+      "progress_percent": 20.0
+    },
+    {
+      "iteration": 7,
+      "temperature_k": 296.36,
+      "pressure_atm": 0.994,
+      "magnetic_field_t": 0.4851,
+      "computation_result": 0.498561,
+      "progress_percent": 23.3
+    },
+    {
+      "iteration": 8,
+      "temperature_k": 301.25,
+      "pressure_atm": 0.907,
+      "magnetic_field_t": 0.5347,
+      "computation_result": 0.502015,
+      "progress_percent": 26.7
+    },
+    {
+      "iteration": 9,
+      "temperature_k": 301.77,
+      "pressure_atm": 0.913,
+      "magnetic_field_t": 0.5168,
+      "computation_result": 0.49911,
+      "progress_percent": 30.0
+    },
+    {
+      "iteration": 10,
+      "temperature_k": 298.81,
+      "pressure_atm": 0.948,
+      "magnetic_field_t": 0.4999,
+      "computation_result": 0.501178,
+      "progress_percent": 33.3
+    },
+    {
+      "iteration": 11,
+      "temperature_k": 298.67,
+      "pressure_atm": 0.901,
+      "magnetic_field_t": 0.497,
+      "computation_result": 0.503285,
+      "progress_percent": 36.7
+    },
+    {
+      "iteration": 12,
+      "temperature_k": 303.91,
+      "pressure_atm": 0.974,
+      "magnetic_field_t": 0.483,
+      "computation_result": 0.496945,
+      "progress_percent": 40.0
+    },
+    {
+      "iteration": 13,
+      "temperature_k": 302.19,
+      "pressure_atm": 0.926,
+      "magnetic_field_t": 0.4568,
+      "computation_result": 0.499181,
+      "progress_percent": 43.3
+    },
+    {
+      "iteration": 14,
+      "temperature_k": 304.4,
+      "pressure_atm": 0.936,
+      "magnetic_field_t": 0.5396,
+      "computation_result": 0.497346,
+      "progress_percent": 46.7
+    },
+    {
+      "iteration": 15,
+      "temperature_k": 297.95,
+      "pressure_atm": 1.089,
+      "magnetic_field_t": 0.4992,
+      "computation_result": 0.503335,
+      "progress_percent": 50.0
+    },
+    {
+      "iteration": 16,
+      "temperature_k": 298.4,
+      "pressure_atm": 1.05,
+      "magnetic_field_t": 0.456,
+      "computation_result": 0.50294,
+      "progress_percent": 53.3
+    },
+    {
+      "iteration": 17,
+      "temperature_k": 298.81,
+      "pressure_atm": 0.93,
+      "magnetic_field_t": 0.495,
+      "computation_result": 0.502775,
+      "progress_percent": 56.7
+    },
+    {
+      "iteration": 18,
+      "temperature_k": 303.68,
+      "pressure_atm": 1.002,
+      "magnetic_field_t": 0.5288,
+      "computation_result": 0.500327,
+      "progress_percent": 60.0
+    },
+    {
+      "iteration": 19,
+      "temperature_k": 303.23,
+      "pressure_atm": 1.035,
+      "magnetic_field_t": 0.4888,
+      "computation_result": 0.502515,
+      "progress_percent": 63.3
+    },
+    {
+      "iteration": 20,
+      "temperature_k": 301.92,
+      "pressure_atm": 0.977,
+      "magnetic_field_t": 0.4969,
+      "computation_result": 0.496274,
+      "progress_percent": 66.7
+    },
+    {
+      "iteration": 21,
+      "temperature_k": 295.14,
+      "pressure_atm": 0.964,
+      "magnetic_field_t": 0.4967,
+      "computation_result": 0.497208,
+      "progress_percent": 70.0
+    },
+    {
+      "iteration": 22,
+      "temperature_k": 295.24,
+      "pressure_atm": 0.974,
+      "magnetic_field_t": 0.5059,
+      "computation_result": 0.497812,
+      "progress_percent": 73.3
+    },
+    {
+      "iteration": 23,
+      "temperature_k": 300.55,
+      "pressure_atm": 1.029,
+      "magnetic_field_t": 0.5248,
+      "computation_result": 0.504884,
+      "progress_percent": 76.7
+    },
+    {
+      "iteration": 24,
+      "temperature_k": 295.55,
+      "pressure_atm": 1.046,
+      "magnetic_field_t": 0.5278,
+      "computation_result": 0.503611,
+      "progress_percent": 80.0
+    },
+    {
+      "iteration": 25,
+      "temperature_k": 298.29,
+      "pressure_atm": 0.934,
+      "magnetic_field_t": 0.456,
+      "computation_result": 0.502353,
+      "progress_percent": 83.3
+    },
+    {
+      "iteration": 26,
+      "temperature_k": 304.15,
+      "pressure_atm": 1.006,
+      "magnetic_field_t": 0.5258,
+      "computation_result": 0.499739,
+      "progress_percent": 86.7
+    },
+    {
+      "iteration": 27,
+      "temperature_k": 301.02,
+      "pressure_atm": 1.065,
+      "magnetic_field_t": 0.4894,
+      "computation_result": 0.496972,
+      "progress_percent": 90.0
+    },
+    {
+      "iteration": 28,
+      "temperature_k": 301.52,
+      "pressure_atm": 1.039,
+      "magnetic_field_t": 0.4588,
+      "computation_result": 0.501661,
+      "progress_percent": 93.3
+    },
+    {
+      "iteration": 29,
+      "temperature_k": 302.21,
+      "pressure_atm": 0.908,
+      "magnetic_field_t": 0.4766,
+      "computation_result": 0.49797,
+      "progress_percent": 96.7
+    },
+    {
+      "iteration": 30,
+      "temperature_k": 303.86,
+      "pressure_atm": 1.035,
+      "magnetic_field_t": 0.5045,
+      "computation_result": 0.498838,
+      "progress_percent": 100.0
+    }
+  ],
+  "system_info_history": [
+    {
+      "timestamp": "2026-03-21T14:17:29.049158",
+      "cpu_percent": 16.7,
+      "memory_percent": 61.8,
+      "memory_used_gb": 19.53594207763672,
+      "memory_total_gb": 31.633289337158203,
+      "disk_free_gb": 385.2774658203125,
+      "gpu": null
+    },
+    {
+      "timestamp": "2026-03-21T14:17:39.159466",
+      "cpu_percent": 25.8,
+      "memory_percent": 61.8,
+      "memory_used_gb": 19.542430877685547,
+      "memory_total_gb": 31.633289337158203,
+      "disk_free_gb": 385.27746200561523,
+      "gpu": null
+    },
+    {
+      "timestamp": "2026-03-21T14:17:49.282484",
+      "cpu_percent": 39.4,
+      "memory_percent": 62.2,
+      "memory_used_gb": 19.661746978759766,
+      "memory_total_gb": 31.633289337158203,
+      "disk_free_gb": 385.2773017883301,
+      "gpu": null
+    },
+    {
+      "timestamp": "2026-03-21T14:17:59.396048",
+      "cpu_percent": 38.0,
+      "memory_percent": 62.4,
+      "memory_used_gb": 19.741912841796875,
+      "memory_total_gb": 31.633289337158203,
+      "disk_free_gb": 385.2771301269531,
+      "gpu": null
+    },
+    {
+      "timestamp": "2026-03-21T14:18:09.508019",
+      "cpu_percent": 18.5,
+      "memory_percent": 62.2,
+      "memory_used_gb": 19.680240631103516,
+      "memory_total_gb": 31.633289337158203,
+      "disk_free_gb": 385.2770080566406,
+      "gpu": null
+    },
+    {
+      "timestamp": "2026-03-21T14:18:19.632751",
+      "cpu_percent": 16.2,
+      "memory_percent": 61.5,
+      "memory_used_gb": 19.468788146972656,
+      "memory_total_gb": 31.633289337158203,
+      "disk_free_gb": 385.2770080566406,
+      "gpu": null
+    },
+    {
+      "timestamp": "2026-03-21T14:18:29.754566",
+      "cpu_percent": 25.4,
+      "memory_percent": 61.9,
+      "memory_used_gb": 19.586463928222656,
+      "memory_total_gb": 31.633289337158203,
+      "disk_free_gb": 385.27700424194336,
+      "gpu": null
+    },
+    {
+      "timestamp": "2026-03-21T14:18:39.864050",
+      "cpu_percent": 12.5,
+      "memory_percent": 61.9,
+      "memory_used_gb": 19.594280242919922,
+      "memory_total_gb": 31.633289337158203,
+      "disk_free_gb": 385.2768211364746,
+      "gpu": null
+    },
+    {
+      "timestamp": "2026-03-21T14:18:49.974608",
+      "cpu_percent": 19.3,
+      "memory_percent": 61.5,
+      "memory_used_gb": 19.455963134765625,
+      "memory_total_gb": 31.633289337158203,
+      "disk_free_gb": 385.276798248291,
+      "gpu": null
+    },
+    {
+      "timestamp": "2026-03-21T14:19:00.084083",
+      "cpu_percent": 26.5,
+      "memory_percent": 62.0,
+      "memory_used_gb": 19.604843139648438,
+      "memory_total_gb": 31.633289337158203,
+      "disk_free_gb": 385.27670669555664,
+      "gpu": null
+    },
+    {
+      "timestamp": "2026-03-21T14:19:10.193256",
+      "cpu_percent": 19.4,
+      "memory_percent": 61.9,
+      "memory_used_gb": 19.56637954711914,
+      "memory_total_gb": 31.633289337158203,
+      "disk_free_gb": 385.2766532897949,
+      "gpu": null
+    },
+    {
+      "timestamp": "2026-03-21T14:19:20.303825",
+      "cpu_percent": 10.6,
+      "memory_percent": 63.3,
+      "memory_used_gb": 20.017955780029297,
+      "memory_total_gb": 31.633289337158203,
+      "disk_free_gb": 385.276123046875,
+      "gpu": null
+    },
+    {
+      "timestamp": "2026-03-21T14:19:30.409746",
+      "cpu_percent": 9.8,
+      "memory_percent": 62.4,
+      "memory_used_gb": 19.729511260986328,
+      "memory_total_gb": 31.633289337158203,
+      "disk_free_gb": 385.27610778808594,
+      "gpu": null
+    },
+    {
+      "timestamp": "2026-03-21T14:19:40.521731",
+      "cpu_percent": 27.6,
+      "memory_percent": 62.0,
+      "memory_used_gb": 19.616470336914062,
+      "memory_total_gb": 31.633289337158203,
+      "disk_free_gb": 385.2760467529297,
+      "gpu": null
+    },
+    {
+      "timestamp": "2026-03-21T14:19:50.641211",
+      "cpu_percent": 29.2,
+      "memory_percent": 62.0,
+      "memory_used_gb": 19.614551544189453,
+      "memory_total_gb": 31.633289337158203,
+      "disk_free_gb": 385.27601623535156,
+      "gpu": null
+    },
+    {
+      "timestamp": "2026-03-21T14:20:00.760810",
+      "cpu_percent": 11.9,
+      "memory_percent": 61.8,
+      "memory_used_gb": 19.556015014648438,
+      "memory_total_gb": 31.633289337158203,
+      "disk_free_gb": 385.27586364746094,
+      "gpu": null
+    },
+    {
+      "timestamp": "2026-03-21T14:20:10.876832",
+      "cpu_percent": 24.2,
+      "memory_percent": 61.8,
+      "memory_used_gb": 19.562049865722656,
+      "memory_total_gb": 31.633289337158203,
+      "disk_free_gb": 385.2758331298828,
+      "gpu": null
+    },
+    {
+      "timestamp": "2026-03-21T14:20:20.996739",
+      "cpu_percent": 22.7,
+      "memory_percent": 61.5,
+      "memory_used_gb": 19.45269012451172,
+      "memory_total_gb": 31.633289337158203,
+      "disk_free_gb": 385.2758102416992,
+      "gpu": null
+    },
+    {
+      "timestamp": "2026-03-21T14:20:31.115481",
+      "cpu_percent": 7.0,
+      "memory_percent": 61.6,
+      "memory_used_gb": 19.4725341796875,
+      "memory_total_gb": 31.633289337158203,
+      "disk_free_gb": 385.27577209472656,
+      "gpu": null
+    },
+    {
+      "timestamp": "2026-03-21T14:20:41.234332",
+      "cpu_percent": 7.3,
+      "memory_percent": 61.6,
+      "memory_used_gb": 19.494125366210938,
+      "memory_total_gb": 31.633289337158203,
+      "disk_free_gb": 385.27576065063477,
+      "gpu": null
+    },
+    {
+      "timestamp": "2026-03-21T14:20:51.351745",
+      "cpu_percent": 18.5,
+      "memory_percent": 61.6,
+      "memory_used_gb": 19.48687744140625,
+      "memory_total_gb": 31.633289337158203,
+      "disk_free_gb": 385.2757568359375,
+      "gpu": null
+    },
+    {
+      "timestamp": "2026-03-21T14:21:01.472079",
+      "cpu_percent": 14.2,
+      "memory_percent": 61.5,
+      "memory_used_gb": 19.456417083740234,
+      "memory_total_gb": 31.633289337158203,
+      "disk_free_gb": 385.2755584716797,
+      "gpu": null
+    },
+    {
+      "timestamp": "2026-03-21T14:21:11.587276",
+      "cpu_percent": 16.9,
+      "memory_percent": 61.6,
+      "memory_used_gb": 19.477134704589844,
+      "memory_total_gb": 31.633289337158203,
+      "disk_free_gb": 385.2755584716797,
+      "gpu": null
+    },
+    {
+      "timestamp": "2026-03-21T14:21:21.701855",
+      "cpu_percent": 0.9,
+      "memory_percent": 61.4,
+      "memory_used_gb": 19.432411193847656,
+      "memory_total_gb": 31.633289337158203,
+      "disk_free_gb": 385.2755470275879,
+      "gpu": null
+    },
+    {
+      "timestamp": "2026-03-21T14:21:31.817107",
+      "cpu_percent": 18.0,
+      "memory_percent": 61.4,
+      "memory_used_gb": 19.41252899169922,
+      "memory_total_gb": 31.633289337158203,
+      "disk_free_gb": 385.2755432128906,
+      "gpu": null
+    },
+    {
+      "timestamp": "2026-03-21T14:21:41.942758",
+      "cpu_percent": 6.5,
+      "memory_percent": 61.6,
+      "memory_used_gb": 19.476776123046875,
+      "memory_total_gb": 31.633289337158203,
+      "disk_free_gb": 385.27553939819336,
+      "gpu": null
+    },
+    {
+      "timestamp": "2026-03-21T14:21:52.061209",
+      "cpu_percent": 18.6,
+      "memory_percent": 61.9,
+      "memory_used_gb": 19.57628631591797,
+      "memory_total_gb": 31.633289337158203,
+      "disk_free_gb": 385.27538299560547,
+      "gpu": null
+    },
+    {
+      "timestamp": "2026-03-21T14:22:02.181243",
+      "cpu_percent": 9.0,
+      "memory_percent": 61.2,
+      "memory_used_gb": 19.37139129638672,
+      "memory_total_gb": 31.633289337158203,
+      "disk_free_gb": 385.27535247802734,
+      "gpu": null
+    },
+    {
+      "timestamp": "2026-03-21T14:22:12.295965",
+      "cpu_percent": 23.9,
+      "memory_percent": 61.4,
+      "memory_used_gb": 19.41855239868164,
+      "memory_total_gb": 31.633289337158203,
+      "disk_free_gb": 385.2753486633301,
+      "gpu": null
+    },
+    {
+      "timestamp": "2026-03-21T14:22:22.413791",
+      "cpu_percent": 27.4,
+      "memory_percent": 61.3,
+      "memory_used_gb": 19.40569305419922,
+      "memory_total_gb": 31.633289337158203,
+      "disk_free_gb": 385.27534103393555,
+      "gpu": null
+    }
+  ],
+  "end_time": "2026-03-21T14:22:22.419824",
+  "actual_duration": 294.4198246002197
+}

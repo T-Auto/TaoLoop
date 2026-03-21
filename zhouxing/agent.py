@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Awaitable, Callable
 import asyncio
 import json
+import time
 
 from .config import Config
 from .context import ContextManager
@@ -46,11 +47,25 @@ class ConversationAgent:
                 message_count=len(session.messages),
             )
         self.context_manager.compact(session)
+        session.meta["runtime_state"] = {
+            "phase": "running",
+            "reply_to_message_id": reply_to_message_id,
+        }
         usage_info: dict[str, Any] = {}
         anchor_id = reply_to_message_id
         display_anchor_id = reply_to_message_id
+        autonomous_deadline = self._autonomous_deadline()
+        step = 0
 
-        for step in range(self.config.max_tool_rounds):
+        while True:
+            if self._autonomous_window_expired(autonomous_deadline):
+                await self._emit_autonomous_pause_notice(
+                    session,
+                    anchor_id=anchor_id,
+                    display_anchor_id=display_anchor_id,
+                )
+                return usage_info
+            step += 1
             prompt_messages, usage = self.context_manager.build(
                 session,
                 upto_message_id=anchor_id,
@@ -60,7 +75,7 @@ class ConversationAgent:
                 self.logger.log(
                     "agent_step",
                     session_id=session.id,
-                    step=step + 1,
+                    step=step,
                     used_tokens=usage.used_tokens,
                     cached_tokens=usage.cached_tokens,
                     prompt_message_count=len(prompt_messages),
@@ -71,7 +86,7 @@ class ConversationAgent:
                     prompt_messages,
                     self.tools.definitions(),
                     usage_info,
-                    step + 1,
+                    step,
                 )
             except Exception as exc:
                 if self.logger:
@@ -79,7 +94,7 @@ class ConversationAgent:
                         "agent_model_failure",
                         exc,
                         session_id=session.id,
-                        step=step + 1,
+                        step=step,
                         reply_to_message_id=reply_to_message_id,
                     )
                 if await self._recover_from_model_failure(
@@ -94,7 +109,7 @@ class ConversationAgent:
                 self.logger.log(
                     "agent_model_response",
                     session_id=session.id,
-                    step=step + 1,
+                    step=step,
                     content_preview=response.content[:400],
                     tool_call_names=[call.name for call in response.tool_calls],
                 )
@@ -130,6 +145,20 @@ class ConversationAgent:
                     )
                     display_anchor_id = assistant_tool_call.id
                 for call_index, call in enumerate(response.tool_calls):
+                    if self._autonomous_window_expired(autonomous_deadline):
+                        anchor_id, display_anchor_id = await self._skip_remaining_tool_calls(
+                            session,
+                            response.tool_calls[call_index:],
+                            anchor_id=anchor_id,
+                            display_anchor_id=display_anchor_id,
+                            reason="autonomous_window_elapsed",
+                        )
+                        await self._emit_autonomous_pause_notice(
+                            session,
+                            anchor_id=anchor_id,
+                            display_anchor_id=display_anchor_id,
+                        )
+                        return usage_info
                     if await self._should_yield_to_buffered_user_input(session.id):
                         anchor_id, display_anchor_id = await self._skip_remaining_tool_calls(
                             session,
@@ -161,7 +190,7 @@ class ConversationAgent:
                                 "tool": call.name,
                                 "phase": "call",
                                 "arguments": call.arguments,
-                                "step": step + 1,
+                                "step": step,
                             }
                         )
                     )
@@ -192,6 +221,21 @@ class ConversationAgent:
                     display_anchor_id = tool_message.id
                     if self.flush_buffered_messages is not None:
                         await self.flush_buffered_messages()
+                    if call.name == "start_background_command":
+                        if call_index + 1 < len(response.tool_calls):
+                            anchor_id, display_anchor_id = await self._skip_remaining_tool_calls(
+                                session,
+                                response.tool_calls[call_index + 1 :],
+                                anchor_id=anchor_id,
+                                display_anchor_id=display_anchor_id,
+                                reason="background_job_started",
+                            )
+                        session.meta["runtime_state"] = {
+                            "phase": "sleeping",
+                            "reason": "background_job_started",
+                            "reply_to_message_id": reply_to_message_id,
+                        }
+                        return usage_info
                 continue
 
             assistant_message = ChatMessage.create(
@@ -199,6 +243,11 @@ class ConversationAgent:
                 response.content.strip() or "(空响应)",
                 meta={"model": response.model, "usage": response.usage},
             )
+            session.meta["runtime_state"] = {
+                "phase": "idle",
+                "reason": "assistant_replied",
+                "reply_to_message_id": reply_to_message_id,
+            }
             previous_anchor = anchor_id
             session.insert_after(anchor_id, assistant_message)
             await self.emit(
@@ -217,11 +266,94 @@ class ConversationAgent:
                 )
             return usage_info
 
+    async def _should_yield_to_buffered_user_input(self, session_id: str) -> bool:
+        if self.has_buffered_user_input is None:
+            return False
+        return await self.has_buffered_user_input(session_id)
+
+    async def _skip_remaining_tool_calls(
+        self,
+        session: SessionRecord,
+        calls: list[Any],
+        *,
+        anchor_id: str,
+        display_anchor_id: str,
+        reason: str = "newer_user_input",
+    ) -> tuple[str, str]:
+        current_anchor = anchor_id
+        current_display_anchor = display_anchor_id
+        for call in calls:
+            if reason == "background_job_started":
+                content = (
+                    f"Tool {call.name} skipped before execution because the background job is now running "
+                    "and this turn has entered standby mode."
+                )
+            elif reason == "autonomous_window_elapsed":
+                content = (
+                    f"Tool {call.name} skipped before execution because the autonomous runtime window "
+                    "elapsed for this turn."
+                )
+            else:
+                content = (
+                    f"Tool {call.name} skipped before execution because a newer user message "
+                    "entered the buffer queue."
+                )
+            tool_message = ChatMessage.create(
+                "tool",
+                content,
+                name=call.name,
+                tool_call_id=call.id,
+                meta={"skipped": True, "reason": reason},
+            )
+            session.insert_after(current_anchor, tool_message)
+            await self.emit(
+                {
+                    "type": "message",
+                    "message": tool_message.to_public_dict(),
+                    "after_message_id": current_display_anchor,
+                }
+            )
+            current_anchor = tool_message.id
+            current_display_anchor = tool_message.id
+        return current_anchor, current_display_anchor
+
+    def _autonomous_deadline(self) -> float | None:
+        limit_sec = max(0, self.config.autonomous_run_limit_sec)
+        if limit_sec == 0:
+            return None
+        return time.monotonic() + limit_sec
+
+    @staticmethod
+    def _autonomous_window_expired(deadline: float | None) -> bool:
+        if deadline is None:
+            return False
+        return time.monotonic() >= deadline
+
+    async def _emit_autonomous_pause_notice(
+        self,
+        session: SessionRecord,
+        *,
+        anchor_id: str,
+        display_anchor_id: str,
+    ) -> None:
+        limit_sec = self.config.autonomous_run_limit_sec
+        session.meta["runtime_state"] = {
+            "phase": "sleeping",
+            "reason": "autonomous_window_elapsed",
+            "autonomous_run_limit_sec": limit_sec,
+        }
         assistant_message = ChatMessage.create(
             "assistant",
-            "已达到最大工具调用轮数，请把目标拆小后继续。",
+            (
+                "已达到本轮自主运行时间上限，当前转入待机；"
+                "等待新的用户输入或后台任务事件后再继续。"
+            ),
+            meta={
+                "autonomous_pause": True,
+                "reason": "autonomous_window_elapsed",
+                "autonomous_run_limit_sec": limit_sec,
+            },
         )
-        previous_anchor = anchor_id
         session.insert_after(anchor_id, assistant_message)
         await self.emit(
             {
@@ -235,47 +367,9 @@ class ConversationAgent:
                 "agent_turn_finish",
                 session_id=session.id,
                 assistant_message_id=assistant_message.id,
-                mode="max_tool_rounds",
+                mode="autonomous_window_elapsed",
+                autonomous_run_limit_sec=limit_sec,
             )
-        return usage_info
-
-    async def _should_yield_to_buffered_user_input(self, session_id: str) -> bool:
-        if self.has_buffered_user_input is None:
-            return False
-        return await self.has_buffered_user_input(session_id)
-
-    async def _skip_remaining_tool_calls(
-        self,
-        session: SessionRecord,
-        calls: list[Any],
-        *,
-        anchor_id: str,
-        display_anchor_id: str,
-    ) -> tuple[str, str]:
-        current_anchor = anchor_id
-        current_display_anchor = display_anchor_id
-        for call in calls:
-            tool_message = ChatMessage.create(
-                "tool",
-                (
-                    f"Tool {call.name} skipped before execution because a newer user message "
-                    "entered the buffer queue."
-                ),
-                name=call.name,
-                tool_call_id=call.id,
-                meta={"skipped": True, "reason": "newer_user_input"},
-            )
-            session.insert_after(current_anchor, tool_message)
-            await self.emit(
-                {
-                    "type": "message",
-                    "message": tool_message.to_public_dict(),
-                    "after_message_id": current_display_anchor,
-                }
-            )
-            current_anchor = tool_message.id
-            current_display_anchor = tool_message.id
-        return current_anchor, current_display_anchor
 
     async def _complete_with_progress(
         self,
@@ -321,6 +415,8 @@ class ConversationAgent:
         exc: Exception,
     ) -> bool:
         user_message = session.messages[session.message_index(reply_to_message_id)]
+        if user_message.role != "user":
+            return False
         fallback = maybe_build_scientific_script_fallback(user_message.content)
         if fallback is None:
             return False

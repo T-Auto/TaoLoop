@@ -176,8 +176,8 @@ var timeNow = time.Now
 
 const pasteBurstWindow = 40 * time.Millisecond
 const (
-	foldedPreviewHeadLines = 2
-	foldedPreviewTailLines = 2
+	foldedPreviewHeadLines = 10
+	foldedPreviewTailLines = 10
 	defaultInputHeight     = 4
 )
 
@@ -1434,7 +1434,11 @@ func summarizeRunCommandGroup(group toolLogGroup) (string, []string) {
 		case "output_truncated":
 			truncatedOut = true
 		case "heartbeat":
-			heartbeat = fmt.Sprintf("running %ds | %s", event.AfterSec, event.Summary)
+			if event.Summary != "" {
+				heartbeat = fmt.Sprintf("running %ds | %s", event.AfterSec, event.Summary)
+			} else {
+				heartbeat = fmt.Sprintf("running %ds", event.AfterSec)
+			}
 		case "timeout":
 			timeoutLine = fmt.Sprintf("timeout after %ds", event.TimeoutSec)
 		case "finish":
@@ -2478,11 +2482,17 @@ func formatToolEvent(event ToolEvent) string {
 	case "output_truncated":
 		return event.Text
 	case "heartbeat":
-		return fmt.Sprintf("运行中 %ds\n%s", event.AfterSec, event.Summary)
+		if event.Summary != "" {
+			return fmt.Sprintf("运行中 %ds\n%s", event.AfterSec, event.Summary)
+		}
+		return fmt.Sprintf("运行中 %ds", event.AfterSec)
 	case "timeout":
 		return fmt.Sprintf("命令达到超时阈值 %ds", event.TimeoutSec)
 	case "finish":
-		return fmt.Sprintf("命令结束 exit=%d duration=%.2fs\n%s", event.ExitCode, event.DurationSec, event.Summary)
+		if event.Summary != "" {
+			return fmt.Sprintf("命令结束 exit=%d duration=%.2fs\n%s", event.ExitCode, event.DurationSec, event.Summary)
+		}
+		return fmt.Sprintf("命令结束 exit=%d duration=%.2fs", event.ExitCode, event.DurationSec)
 	default:
 		return fmt.Sprintf("%s: %s", event.Phase, event.Summary)
 	}

@@ -5,7 +5,9 @@ description = "ZhouXing scientific agent CLI backend"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+  "gputil>=1.4.0",
   "httpx>=0.28.1",
+  "numpy>=2.4.3",
   "psutil>=7.0.0",
 ]
 
