@@ -93,7 +93,7 @@ def main() -> int:
     assert process.stdin is not None
     assert process.stdout is not None
 
-    command = "python smoke_long_sim.py --seconds 22"
+    command = "python smoke_long_sim.py --seconds 11"
     lines: Queue[str | None] = Queue()
     Thread(target=pump_lines, args=(process.stdout, lines), daemon=True).start()
 

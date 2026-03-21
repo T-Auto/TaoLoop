@@ -530,6 +530,31 @@ func TestBuildPendingTranscriptPrintTextOnlyPrintsNewBlocks(t *testing.T) {
 	}
 }
 
+func TestHighlightCommandTextPreservesCommandText(t *testing.T) {
+	raw := highlightCommandText("$ git diff --stat .\\internal\\tui\\model.go")
+	if got := ansi.Strip(raw); got != "$ git diff --stat .\\internal\\tui\\model.go" {
+		t.Fatalf("unexpected stripped command output: %q", got)
+	}
+}
+
+func TestHighlightCodeLineContentMarksDiffAddsAndDeletes(t *testing.T) {
+	addedRaw, addedDiff := highlightCodeLineContent("   8: +return value")
+	if addedDiff != diffAdd {
+		t.Fatalf("expected diffAdd, got %v", addedDiff)
+	}
+	if got := ansi.Strip(addedRaw); got != "   8: +return value" {
+		t.Fatalf("unexpected stripped added line: %q", got)
+	}
+
+	deletedRaw, deletedDiff := highlightCodeLineContent("   9: -return oldValue")
+	if deletedDiff != diffDelete {
+		t.Fatalf("expected diffDelete, got %v", deletedDiff)
+	}
+	if got := ansi.Strip(deletedRaw); got != "   9: -return oldValue" {
+		t.Fatalf("unexpected stripped deleted line: %q", got)
+	}
+}
+
 func TestCtrlVPastesClipboardIntoInput(t *testing.T) {
 	oldReadClipboard := readClipboard
 	oldTimeNow := timeNow

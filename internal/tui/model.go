@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/list"
@@ -62,18 +63,62 @@ var (
 			Bold(true).
 			Foreground(lipgloss.Color("#F2F2F2"))
 	logLineStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#D0D0D0"))
+			Foreground(lipgloss.Color("#7F7F7F"))
 	logOmittedStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#8C8C8C"))
+			Foreground(lipgloss.Color("#5F5F5F"))
 	codeLineStyle = lipgloss.NewStyle().
 			Background(lipgloss.Color("#111111")).
 			Foreground(lipgloss.Color("#F5F5F5")).
 			Padding(0, 1)
+	codeAddLineStyle = lipgloss.NewStyle().
+				Background(lipgloss.Color("#0B1610")).
+				Foreground(lipgloss.Color("#E7F6EC")).
+				Padding(0, 1)
+	codeDeleteLineStyle = lipgloss.NewStyle().
+				Background(lipgloss.Color("#1A0D0D")).
+				Foreground(lipgloss.Color("#F8E1E1")).
+				Padding(0, 1)
 	commandLineStyle = lipgloss.NewStyle().
 				Background(lipgloss.Color("#1A1A1A")).
 				Foreground(lipgloss.Color("#FFFFFF")).
 				Bold(true).
 				Padding(0, 1)
+	codeLineNumberStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#6C7480"))
+	codeKeywordTokenStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#7CC4FF")).
+				Bold(true)
+	codeStringTokenStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#8DD694"))
+	codeCommentTokenStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#6E7781"))
+	codeNumberTokenStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#F2C66D"))
+	commandPromptTokenStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#7CC4FF")).
+				Bold(true)
+	commandExecTokenStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#FFFFFF")).
+				Bold(true)
+	commandFlagTokenStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#7CC4FF"))
+	commandPathTokenStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#F2C66D"))
+	commandStringTokenStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#8DD694"))
+	commandOperatorTokenStyle = lipgloss.NewStyle().
+					Foreground(lipgloss.Color("#A6A6A6"))
+	commandMetaTokenStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#8C8C8C"))
+	stderrTokenStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#FF8A8A")).
+				Bold(true)
+	diffAddMarkerStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#70D88A")).
+				Bold(true)
+	diffDeleteMarkerStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#FF8A8A")).
+				Bold(true)
 	statusStyle = lipgloss.NewStyle().
 			Background(lipgloss.Color("#111111")).
 			Foreground(lipgloss.Color("#F2F2F2")).
@@ -136,6 +181,26 @@ const (
 	foldedPreviewTailLines = 2
 	defaultInputHeight     = 4
 )
+
+type diffKind int
+
+const (
+	diffNone diffKind = iota
+	diffAdd
+	diffDelete
+)
+
+var codeKeywords = map[string]struct{}{
+	"and": {}, "as": {}, "async": {}, "await": {}, "break": {}, "case": {}, "catch": {},
+	"class": {}, "const": {}, "continue": {}, "def": {}, "default": {}, "defer": {}, "do": {},
+	"elif": {}, "else": {}, "except": {}, "export": {}, "extends": {}, "false": {}, "finally": {},
+	"fn": {}, "for": {}, "from": {}, "func": {}, "function": {}, "if": {}, "implements": {},
+	"import": {}, "in": {}, "interface": {}, "let": {}, "match": {}, "new": {}, "nil": {},
+	"none": {}, "not": {}, "null": {}, "or": {}, "package": {}, "pass": {}, "private": {},
+	"protected": {}, "public": {}, "raise": {}, "range": {}, "return": {}, "self": {},
+	"static": {}, "struct": {}, "super": {}, "switch": {}, "this": {}, "throw": {}, "true": {},
+	"try": {}, "type": {}, "var": {}, "while": {}, "with": {}, "yield": {},
+}
 
 type pageLayout struct {
 	width  int
@@ -719,24 +784,112 @@ func renderTerminalMessage(message ChatMessage) string {
 	}
 	switch message.Role {
 	case "user":
-		return prefixBlock(body, "> ", "  ")
+		return renderTerminalPrefixedBody(body, "> ", "  ")
 	case "event":
-		return prefixBlock(body, "! ", "  ")
+		return renderTerminalPrefixedBody(body, "! ", "  ")
 	default:
-		return body
+		return renderTerminalBody(body)
 	}
 }
 
 func renderTerminalLogBlock(header string, lines []string) string {
 	preview := foldedPreviewLines(lines)
 	if len(preview) == 0 {
-		return header
+		return renderTerminalHighlightedLogHeader(header)
 	}
-	rendered := []string{header, "└ " + preview[0]}
+	rendered := []string{renderTerminalHighlightedLogHeader(header), renderTerminalHighlightedLogLine("└ ", preview[0], logLineStyle)}
 	for _, line := range preview[1:] {
-		rendered = append(rendered, "  "+line)
+		style := logLineStyle
+		if strings.HasPrefix(line, "… +") {
+			style = logOmittedStyle
+		}
+		rendered = append(rendered, renderTerminalHighlightedLogLine("  ", line, style))
 	}
 	return strings.Join(rendered, "\n")
+}
+
+func renderTerminalPrefixedBody(body string, firstPrefix string, restPrefix string) string {
+	lines := strings.Split(body, "\n")
+	if len(lines) == 0 {
+		return ""
+	}
+	inCode := false
+	rendered := make([]string, 0, len(lines))
+	for index, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") {
+			inCode = !inCode
+			continue
+		}
+		prefix := restPrefix
+		if index == 0 {
+			prefix = firstPrefix
+		}
+		rendered = append(rendered, prefix+renderTerminalBodyLine(line, inCode))
+	}
+	return strings.Join(rendered, "\n")
+}
+
+func renderTerminalBody(body string) string {
+	lines := strings.Split(body, "\n")
+	if len(lines) == 0 {
+		return ""
+	}
+	inCode := false
+	rendered := make([]string, 0, len(lines))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") {
+			inCode = !inCode
+			continue
+		}
+		rendered = append(rendered, renderTerminalBodyLine(line, inCode))
+	}
+	return strings.Join(rendered, "\n")
+}
+
+func renderTerminalBodyLine(line string, inCode bool) string {
+	trimmed := strings.TrimSpace(line)
+	switch {
+	case strings.HasPrefix(trimmed, "└"):
+		return subtleStyle.Render(line)
+	case inCode || looksLikeNumberedCodeLine(line):
+		return renderTerminalCodeLine(line)
+	case isCommandLine(trimmed):
+		return renderTerminalCommandLine(line)
+	default:
+		return renderStructuredLineContent(line, false)
+	}
+}
+
+func renderTerminalCodeLine(line string) string {
+	content, diff := highlightCodeLineContent(line)
+	switch diff {
+	case diffAdd:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("#70D88A")).Render(content)
+	case diffDelete:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("#FF8A8A")).Render(content)
+	default:
+		return content
+	}
+}
+
+func renderTerminalCommandLine(line string) string {
+	return highlightCommandText(line)
+}
+
+func renderTerminalHighlightedLogHeader(header string) string {
+	if strings.HasPrefix(header, "• Ran ") {
+		return logHeaderStyle.Render(
+			commandMetaTokenStyle.Render("• Ran ") +
+				highlightShellCommand(strings.TrimPrefix(header, "• Ran ")),
+		)
+	}
+	return logHeaderStyle.Render(header)
+}
+
+func renderTerminalHighlightedLogLine(prefix string, line string, style lipgloss.Style) string {
+	return style.Render(prefix + renderStructuredLineContent(line, true))
 }
 
 func prefixBlock(text string, firstPrefix string, restPrefix string) string {
@@ -1040,15 +1193,15 @@ func renderToolLogGroup(group toolLogGroup, width int) string {
 func renderCollapsedLogBlock(header string, lines []string, width int, blockStyle lipgloss.Style) string {
 	innerWidth := contentWidthForStyle(width, blockStyle)
 	preview := foldedPreviewLines(lines)
-	rendered := []string{logHeaderStyle.Width(innerWidth).Render(header)}
+	rendered := []string{renderHighlightedLogHeader(header, innerWidth)}
 	if len(preview) > 0 {
-		rendered = append(rendered, logLineStyle.Width(innerWidth).Render("└ "+preview[0]))
+		rendered = append(rendered, renderHighlightedLogLine("└ ", preview[0], innerWidth, logLineStyle))
 		for _, line := range preview[1:] {
 			style := logLineStyle
 			if strings.HasPrefix(line, "… +") {
 				style = logOmittedStyle
 			}
-			rendered = append(rendered, style.Width(innerWidth).Render("  "+line))
+			rendered = append(rendered, renderHighlightedLogLine("  ", line, innerWidth, style))
 		}
 	}
 	return blockStyle.Width(innerWidth).Render(strings.Join(rendered, "\n"))
@@ -1680,28 +1833,393 @@ func chatMessageLabel(message ChatMessage) string {
 	return label
 }
 
+func renderHighlightedLogHeader(header string, width int) string {
+	if strings.HasPrefix(header, "• Ran ") {
+		return logHeaderStyle.Width(width).Render(
+			commandMetaTokenStyle.Render("• Ran ") +
+				highlightShellCommand(strings.TrimPrefix(header, "• Ran ")),
+		)
+	}
+	return logHeaderStyle.Width(width).Render(header)
+}
+
+func renderHighlightedLogLine(prefix string, line string, width int, style lipgloss.Style) string {
+	return style.Width(width).Render(prefix + renderStructuredLineContent(line, true))
+}
+
+func renderStructuredLineContent(line string, allowStandaloneDiff bool) string {
+	switch {
+	case strings.HasPrefix(line, "stderr | "):
+		return stderrTokenStyle.Render("stderr |") + " " + strings.TrimPrefix(line, "stderr | ")
+	case strings.HasPrefix(line, "cwd: "):
+		return commandMetaTokenStyle.Render("cwd: ") + commandPathTokenStyle.Render(strings.TrimPrefix(line, "cwd: "))
+	case strings.HasPrefix(line, "cwd="):
+		return commandMetaTokenStyle.Render("cwd=") + commandPathTokenStyle.Render(strings.TrimPrefix(line, "cwd="))
+	case isCommandLine(strings.TrimSpace(line)):
+		return highlightCommandText(line)
+	case looksLikeNumberedCodeLine(line):
+		content, _ := highlightCodeLineContent(line)
+		return content
+	case allowStandaloneDiff && looksLikeStandaloneDiffLine(strings.TrimSpace(line)):
+		content, _ := highlightCodeLineContent(line)
+		return content
+	default:
+		return line
+	}
+}
+
 func styleMessageBody(content string, width int) string {
 	lines := strings.Split(content, "\n")
 	if len(lines) == 0 {
 		return ""
 	}
-	var rendered []string
+	rendered := make([]string, 0, len(lines))
 	inCode := false
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		switch {
-		case strings.HasPrefix(trimmed, "```"):
+		if strings.HasPrefix(trimmed, "```") {
 			inCode = !inCode
 			continue
-		case inCode:
-			rendered = append(rendered, codeLineStyle.Width(width).Render(line))
-		case strings.HasPrefix(trimmed, "$ ") || strings.HasPrefix(trimmed, "PS>") || strings.HasPrefix(trimmed, "command="):
-			rendered = append(rendered, commandLineStyle.Width(width).Render(line))
-		default:
-			rendered = append(rendered, lipgloss.NewStyle().Width(width).Render(line))
 		}
+		rendered = append(rendered, renderMessageBodyLine(line, width, inCode))
 	}
 	return strings.Join(rendered, "\n")
+}
+
+func renderMessageBodyLine(line string, width int, inCode bool) string {
+	trimmed := strings.TrimSpace(line)
+	switch {
+	case strings.HasPrefix(trimmed, "└"):
+		return subtleStyle.Width(width).Render(line)
+	case inCode || looksLikeNumberedCodeLine(line):
+		return renderCodeMessageLine(line, width)
+	case isCommandLine(trimmed):
+		return renderCommandMessageLine(line, width)
+	default:
+		return lipgloss.NewStyle().Width(width).Render(renderStructuredLineContent(line, false))
+	}
+}
+
+func renderCodeMessageLine(line string, width int) string {
+	content, diff := highlightCodeLineContent(line)
+	style := codeLineStyle
+	switch diff {
+	case diffAdd:
+		style = codeAddLineStyle
+	case diffDelete:
+		style = codeDeleteLineStyle
+	}
+	return style.Width(width).Render(content)
+}
+
+func renderCommandMessageLine(line string, width int) string {
+	return commandLineStyle.Width(width).Render(highlightCommandText(line))
+}
+
+func highlightCommandText(line string) string {
+	switch {
+	case strings.HasPrefix(line, "$ "):
+		return commandPromptTokenStyle.Render("$ ") + highlightShellCommand(strings.TrimPrefix(line, "$ "))
+	case strings.HasPrefix(line, "PS> "):
+		return commandPromptTokenStyle.Render("PS> ") + highlightShellCommand(strings.TrimPrefix(line, "PS> "))
+	case strings.HasPrefix(line, "PS>"):
+		return commandPromptTokenStyle.Render("PS>") + highlightShellCommand(strings.TrimPrefix(line, "PS>"))
+	case strings.HasPrefix(line, "command="):
+		return commandMetaTokenStyle.Render("command=") + highlightShellCommand(strings.TrimPrefix(line, "command="))
+	default:
+		return highlightShellCommand(line)
+	}
+}
+
+func highlightShellCommand(command string) string {
+	tokens := splitCommandTokens(command)
+	var builder strings.Builder
+	firstWord := true
+	for _, token := range tokens {
+		switch {
+		case strings.TrimSpace(token) == "":
+			builder.WriteString(token)
+		case len(token) >= 2 && ((token[0] == '"' && token[len(token)-1] == '"') || (token[0] == '\'' && token[len(token)-1] == '\'') || (token[0] == '`' && token[len(token)-1] == '`')):
+			builder.WriteString(commandStringTokenStyle.Render(token))
+			firstWord = false
+		case isCommandOperator(token):
+			builder.WriteString(commandOperatorTokenStyle.Render(token))
+		case firstWord && strings.Contains(token, "=") && !strings.HasPrefix(token, ".") && !looksLikePathToken(token):
+			builder.WriteString(commandMetaTokenStyle.Render(token))
+		case firstWord:
+			builder.WriteString(commandExecTokenStyle.Render(token))
+			firstWord = false
+		case isCommandFlag(token):
+			builder.WriteString(commandFlagTokenStyle.Render(token))
+		case looksLikeEnvToken(token):
+			builder.WriteString(commandMetaTokenStyle.Render(token))
+		case looksLikePathToken(token):
+			builder.WriteString(commandPathTokenStyle.Render(token))
+		default:
+			builder.WriteString(token)
+		}
+	}
+	return builder.String()
+}
+
+func splitCommandTokens(command string) []string {
+	tokens := make([]string, 0, len(command)/2)
+	for index := 0; index < len(command); {
+		switch {
+		case isWhitespaceByte(command[index]):
+			start := index
+			for index < len(command) && isWhitespaceByte(command[index]) {
+				index++
+			}
+			tokens = append(tokens, command[start:index])
+		case strings.HasPrefix(command[index:], "&&"),
+			strings.HasPrefix(command[index:], "||"),
+			strings.HasPrefix(command[index:], ">>"):
+			tokens = append(tokens, command[index:index+2])
+			index += 2
+		case strings.ContainsRune("|;&<>", rune(command[index])):
+			tokens = append(tokens, command[index:index+1])
+			index++
+		case command[index] == '"' || command[index] == '\'' || command[index] == '`':
+			end := scanQuotedSegment(command, index, command[index])
+			tokens = append(tokens, command[index:end])
+			index = end
+		default:
+			start := index
+			for index < len(command) &&
+				!isWhitespaceByte(command[index]) &&
+				!strings.ContainsRune("|;&<>", rune(command[index])) &&
+				command[index] != '"' &&
+				command[index] != '\'' &&
+				command[index] != '`' {
+				index++
+			}
+			tokens = append(tokens, command[start:index])
+		}
+	}
+	return tokens
+}
+
+func isCommandOperator(token string) bool {
+	switch token {
+	case "|", "||", "&&", ";", ">", ">>", "<":
+		return true
+	default:
+		return false
+	}
+}
+
+func isCommandFlag(token string) bool {
+	if len(token) < 2 {
+		return false
+	}
+	if token[0] == '-' {
+		return true
+	}
+	return token[0] == '/' && !looksLikePathToken(token)
+}
+
+func looksLikeEnvToken(token string) bool {
+	if strings.HasPrefix(token, "$") {
+		return true
+	}
+	return strings.HasPrefix(token, "%") && strings.HasSuffix(token, "%")
+}
+
+func looksLikePathToken(token string) bool {
+	switch {
+	case strings.Contains(token, `\`), strings.Contains(token, "/"):
+		return true
+	case strings.HasPrefix(token, "."), strings.HasPrefix(token, "~"):
+		return true
+	case len(token) >= 3 && unicode.IsLetter(rune(token[0])) && token[1] == ':' && (token[2] == '\\' || token[2] == '/'):
+		return true
+	default:
+		return false
+	}
+}
+
+func highlightCodeLineContent(line string) (string, diffKind) {
+	prefix, content := splitLineNumberPrefix(line)
+	leading, marker, rest, diff := splitDiffPayload(content)
+
+	var builder strings.Builder
+	if prefix != "" {
+		builder.WriteString(codeLineNumberStyle.Render(prefix))
+	}
+	if leading != "" {
+		builder.WriteString(leading)
+	}
+	switch diff {
+	case diffAdd:
+		builder.WriteString(diffAddMarkerStyle.Render(marker))
+	case diffDelete:
+		builder.WriteString(diffDeleteMarkerStyle.Render(marker))
+	}
+	builder.WriteString(highlightCodeTokens(rest))
+	return builder.String(), diff
+}
+
+func splitLineNumberPrefix(line string) (string, string) {
+	index := 0
+	for index < len(line) && isWhitespaceByte(line[index]) {
+		index++
+	}
+	digitStart := index
+	for index < len(line) && unicode.IsDigit(rune(line[index])) {
+		index++
+	}
+	if index == digitStart || index >= len(line) || line[index] != ':' {
+		return "", line
+	}
+	index++
+	for index < len(line) && line[index] == ' ' {
+		index++
+	}
+	return line[:index], line[index:]
+}
+
+func splitDiffPayload(text string) (string, string, string, diffKind) {
+	index := 0
+	for index < len(text) && isWhitespaceByte(text[index]) {
+		index++
+	}
+	if index >= len(text) {
+		return "", "", text, diffNone
+	}
+	switch text[index] {
+	case '+':
+		if strings.HasPrefix(text[index:], "+++") {
+			return "", "", text, diffNone
+		}
+		return text[:index], "+", text[index+1:], diffAdd
+	case '-':
+		if strings.HasPrefix(text[index:], "---") {
+			return "", "", text, diffNone
+		}
+		return text[:index], "-", text[index+1:], diffDelete
+	default:
+		return "", "", text, diffNone
+	}
+}
+
+func highlightCodeTokens(text string) string {
+	var builder strings.Builder
+	for index := 0; index < len(text); {
+		switch {
+		case strings.HasPrefix(text[index:], "//"):
+			builder.WriteString(codeCommentTokenStyle.Render(text[index:]))
+			return builder.String()
+		case text[index] == '#' && (index == 0 || isWhitespaceByte(text[index-1])):
+			builder.WriteString(codeCommentTokenStyle.Render(text[index:]))
+			return builder.String()
+		case strings.HasPrefix(text[index:], "-- ") && (index == 0 || isWhitespaceByte(text[index-1])):
+			builder.WriteString(codeCommentTokenStyle.Render(text[index:]))
+			return builder.String()
+		case text[index] == '"' || text[index] == '\'' || text[index] == '`':
+			end := scanQuotedSegment(text, index, text[index])
+			builder.WriteString(codeStringTokenStyle.Render(text[index:end]))
+			index = end
+		case isCodeNumberStart(text, index):
+			end := scanCodeNumber(text, index)
+			builder.WriteString(codeNumberTokenStyle.Render(text[index:end]))
+			index = end
+		case isCodeWordStart(text[index]):
+			end := scanCodeWord(text, index)
+			word := text[index:end]
+			if _, ok := codeKeywords[strings.ToLower(word)]; ok {
+				builder.WriteString(codeKeywordTokenStyle.Render(word))
+			} else {
+				builder.WriteString(word)
+			}
+			index = end
+		default:
+			builder.WriteByte(text[index])
+			index++
+		}
+	}
+	return builder.String()
+}
+
+func scanQuotedSegment(text string, start int, quote byte) int {
+	index := start + 1
+	for index < len(text) {
+		if quote != '`' && text[index] == '\\' && index+1 < len(text) {
+			index += 2
+			continue
+		}
+		if text[index] == quote {
+			return index + 1
+		}
+		index++
+	}
+	return len(text)
+}
+
+func isCodeNumberStart(text string, index int) bool {
+	if index >= len(text) || !unicode.IsDigit(rune(text[index])) {
+		return false
+	}
+	return index == 0 || !isCodeWordByte(text[index-1])
+}
+
+func scanCodeNumber(text string, start int) int {
+	index := start
+	for index < len(text) {
+		switch {
+		case unicode.IsDigit(rune(text[index])):
+			index++
+		case text[index] == '.', text[index] == '_', text[index] == 'x', text[index] == 'X', text[index] == 'b', text[index] == 'B', text[index] == 'o', text[index] == 'O':
+			index++
+		case text[index] >= 'a' && text[index] <= 'f':
+			index++
+		case text[index] >= 'A' && text[index] <= 'F':
+			index++
+		default:
+			return index
+		}
+	}
+	return index
+}
+
+func isCodeWordStart(char byte) bool {
+	return char == '_' || unicode.IsLetter(rune(char))
+}
+
+func isCodeWordByte(char byte) bool {
+	return isCodeWordStart(char) || unicode.IsDigit(rune(char))
+}
+
+func scanCodeWord(text string, start int) int {
+	index := start
+	for index < len(text) && isCodeWordByte(text[index]) {
+		index++
+	}
+	return index
+}
+
+func isCommandLine(trimmed string) bool {
+	return strings.HasPrefix(trimmed, "$ ") ||
+		strings.HasPrefix(trimmed, "PS>") ||
+		strings.HasPrefix(trimmed, "command=")
+}
+
+func looksLikeNumberedCodeLine(line string) bool {
+	prefix, _ := splitLineNumberPrefix(line)
+	return prefix != ""
+}
+
+func looksLikeStandaloneDiffLine(trimmed string) bool {
+	return strings.HasPrefix(trimmed, "diff --git") ||
+		strings.HasPrefix(trimmed, "@@") ||
+		strings.HasPrefix(trimmed, "+++ ") ||
+		strings.HasPrefix(trimmed, "--- ") ||
+		(strings.HasPrefix(trimmed, "+") && !strings.HasPrefix(trimmed, "+++")) ||
+		(strings.HasPrefix(trimmed, "-") && !strings.HasPrefix(trimmed, "---"))
+}
+
+func isWhitespaceByte(char byte) bool {
+	return char == ' ' || char == '\t'
 }
 
 func formatToolEvent(event ToolEvent) string {

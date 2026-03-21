@@ -3,8 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 import asyncio
+import locale
 import os
 import re
+import shutil
 import subprocess
 import time
 import uuid
@@ -15,6 +17,38 @@ from .monitor import ResourceMonitor
 
 
 ToolEmitter = Callable[[dict[str, Any]], Awaitable[None] | None]
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+SEARCH_SKIP_DIR_NAMES = {".git", ".venv", ".zhouxing", "__pycache__"}
+BINARY_FILE_SUFFIXES = {
+    ".7z",
+    ".a",
+    ".bin",
+    ".class",
+    ".dll",
+    ".dylib",
+    ".exe",
+    ".gif",
+    ".gz",
+    ".ico",
+    ".jar",
+    ".jpeg",
+    ".jpg",
+    ".lib",
+    ".mp3",
+    ".mp4",
+    ".o",
+    ".obj",
+    ".pdf",
+    ".png",
+    ".pyc",
+    ".pyd",
+    ".pyo",
+    ".so",
+    ".tar",
+    ".wav",
+    ".webp",
+    ".zip",
+}
 
 
 def _clip(text: str, limit: int) -> str:
@@ -22,6 +56,10 @@ def _clip(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return f"{text[:limit]}\n...[truncated {len(text) - limit} chars]"
+
+
+def _strip_ansi(text: str) -> str:
+    return ANSI_ESCAPE_RE.sub("", text)
 
 
 def _new_tool_event_id() -> str:
@@ -297,7 +335,7 @@ class ToolRegistry:
         target = self._resolve_path(path)
         flags = re.IGNORECASE if ignore_case else 0
         regex = re.compile(pattern, flags)
-        files = [target] if target.is_file() else [item for item in target.rglob("*") if item.is_file()]
+        files = self._iter_search_files(target)
         hits: list[str] = []
         for file_path in files:
             try:
@@ -316,6 +354,32 @@ class ToolRegistry:
         if not hits:
             return "Search hits:\n(no matches)"
         return "Search hits:\n" + "\n".join(hits)
+
+    def _iter_search_files(self, target: Path) -> list[Path]:
+        if target.is_file():
+            return [] if self._should_skip_search_file(target) else [target]
+
+        files: list[Path] = []
+        for current_root, dirnames, filenames in os.walk(target):
+            dirnames[:] = sorted(name for name in dirnames if name not in SEARCH_SKIP_DIR_NAMES)
+            root_path = Path(current_root)
+            for filename in sorted(filenames):
+                file_path = root_path / filename
+                if self._should_skip_search_file(file_path):
+                    continue
+                files.append(file_path)
+        return files
+
+    def _should_skip_search_file(self, path: Path) -> bool:
+        if any(part in SEARCH_SKIP_DIR_NAMES for part in path.parts):
+            return True
+        if path.suffix.lower() in BINARY_FILE_SUFFIXES:
+            return True
+        try:
+            with path.open("rb") as handle:
+                return b"\x00" in handle.read(4096)
+        except OSError:
+            return True
 
     async def _write_file(self, path: str, content: str, append: bool = False) -> str:
         target = self._resolve_path(path)
@@ -369,6 +433,35 @@ class ToolRegistry:
         target.write_text(updated, encoding="utf-8")
         return f"replaced {replacements} occurrence(s) in {target}"
 
+    def _resolve_shell_command(self, command: str) -> tuple[list[str] | str, bool, str]:
+        if os.name == "nt":
+            shell_path = shutil.which("pwsh") or shutil.which("powershell") or shutil.which("powershell.exe")
+            if shell_path:
+                return [
+                    shell_path,
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    self._wrap_powershell_command(command),
+                ], False, "utf-8"
+            preferred = locale.getpreferredencoding(False) or "utf-8"
+            return command, True, preferred
+
+        shell_path = os.environ.get("SHELL") or ("/bin/bash" if Path("/bin/bash").exists() else "/bin/sh")
+        return [shell_path, "-lc", command], False, "utf-8"
+
+    @staticmethod
+    def _wrap_powershell_command(command: str) -> str:
+        utf8_preamble = (
+            "$OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
+            "[Console]::InputEncoding = $OutputEncoding; "
+            "[Console]::OutputEncoding = $OutputEncoding; "
+        )
+        return f"{utf8_preamble}{command}"
+
     async def _run_command(
         self,
         command: str,
@@ -397,16 +490,17 @@ class ToolRegistry:
             event_cursor=event_cursor,
         )
 
+        popen_command, use_shell, encoding = self._resolve_shell_command(command)
         process = subprocess.Popen(
-            command,
+            popen_command,
             cwd=str(target_cwd),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             stdin=subprocess.DEVNULL,
             env=env,
-            shell=True,
+            shell=use_shell,
             text=True,
-            encoding="utf-8",
+            encoding=encoding,
             errors="replace",
             bufsize=1,
         )
@@ -424,7 +518,7 @@ class ToolRegistry:
                 line = await asyncio.to_thread(stream.readline)
                 if line == "":
                     break
-                text = line.rstrip("\r\n")
+                text = _strip_ansi(line).rstrip("\r\n")
                 sink.append(text)
                 if len(sink) > max_lines:
                     del sink[0]

@@ -16,6 +16,34 @@ def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
 
 
+def _assistant_tool_call_ids(message: "ChatMessage") -> set[str]:
+    if message.role != "assistant":
+        return set()
+    raw_tool_calls = message.meta.get("tool_calls")
+    if not isinstance(raw_tool_calls, list):
+        return set()
+    call_ids: set[str] = set()
+    for item in raw_tool_calls:
+        if not isinstance(item, dict):
+            continue
+        call_id = item.get("id")
+        if isinstance(call_id, str) and call_id:
+            call_ids.add(call_id)
+    return call_ids
+
+
+def _sanitize_message(message: "ChatMessage", reason: str) -> None:
+    original_role = message.role
+    message.role = "event"
+    if original_role == "tool":
+        message.tool_call_id = None
+    message.meta = {
+        **message.meta,
+        "sanitized_from_role": original_role,
+        "sanitized_reason": reason,
+    }
+
+
 @dataclass(slots=True)
 class ChatMessage:
     id: str
@@ -128,16 +156,58 @@ class SessionRecord:
 
     def sanitize(self) -> int:
         repaired = 0
-        for message in self.messages:
-            if message.role != "tool" or message.tool_call_id:
+        valid_tool_indexes: set[int] = set()
+
+        index = 0
+        while index < len(self.messages):
+            message = self.messages[index]
+            tool_call_ids = _assistant_tool_call_ids(message)
+            if not tool_call_ids:
+                index += 1
                 continue
-            message.role = "event"
-            message.meta = {
-                **message.meta,
-                "sanitized_from_role": "tool",
-                "sanitized_reason": "missing_tool_call_id",
-            }
-            repaired += 1
+
+            matched_tool_ids: set[str] = set()
+            matched_tool_indexes: list[int] = []
+            probe = index + 1
+            while probe < len(self.messages):
+                next_message = self.messages[probe]
+                if (
+                    next_message.role == "tool"
+                    and next_message.tool_call_id in tool_call_ids
+                    and next_message.tool_call_id not in matched_tool_ids
+                ):
+                    matched_tool_ids.add(next_message.tool_call_id)
+                    matched_tool_indexes.append(probe)
+                    probe += 1
+                    continue
+                if next_message.to_llm_message() is None:
+                    probe += 1
+                    continue
+                break
+
+            if matched_tool_ids == tool_call_ids:
+                valid_tool_indexes.update(matched_tool_indexes)
+            else:
+                _sanitize_message(message, "incomplete_tool_call_block")
+                repaired += 1
+                for tool_index in matched_tool_indexes:
+                    tool_message = self.messages[tool_index]
+                    if tool_message.role != "tool":
+                        continue
+                    _sanitize_message(tool_message, "incomplete_tool_call_block")
+                    repaired += 1
+            index = probe
+
+        for index, message in enumerate(self.messages):
+            if message.role != "tool":
+                continue
+            if not message.tool_call_id:
+                _sanitize_message(message, "missing_tool_call_id")
+                repaired += 1
+                continue
+            if index not in valid_tool_indexes:
+                _sanitize_message(message, "orphan_tool_message")
+                repaired += 1
         return repaired
 
     def to_dict(self) -> dict[str, Any]:

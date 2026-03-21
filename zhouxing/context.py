@@ -33,6 +33,87 @@ def _summarize_message(message: ChatMessage) -> str:
     return f"- {prefix}: {snippet}"
 
 
+def _tool_call_ids(message: ChatMessage) -> set[str]:
+    if message.role != "assistant":
+        return set()
+    raw_tool_calls = message.meta.get("tool_calls")
+    if not isinstance(raw_tool_calls, list):
+        return set()
+    call_ids: set[str] = set()
+    for item in raw_tool_calls:
+        if not isinstance(item, dict):
+            continue
+        call_id = item.get("id")
+        if isinstance(call_id, str) and call_id:
+            call_ids.add(call_id)
+    return call_ids
+
+
+def _message_token_cost(message: ChatMessage) -> int:
+    return estimate_tokens(message.content) + 24
+
+
+def _group_llm_messages(transcript: list[ChatMessage]) -> list[list[ChatMessage]]:
+    groups: list[list[ChatMessage]] = []
+    index = 0
+    while index < len(transcript):
+        message = transcript[index]
+        tool_call_ids = _tool_call_ids(message)
+        if tool_call_ids:
+            group = [message]
+            matched_tool_call_ids: set[str] = set()
+            index += 1
+            while index < len(transcript):
+                next_message = transcript[index]
+                if (
+                    next_message.role == "tool"
+                    and next_message.tool_call_id in tool_call_ids
+                    and next_message.tool_call_id not in matched_tool_call_ids
+                ):
+                    group.append(next_message)
+                    matched_tool_call_ids.add(next_message.tool_call_id)
+                    index += 1
+                    continue
+                if next_message.to_llm_message() is None:
+                    index += 1
+                    continue
+                break
+            if matched_tool_call_ids == tool_call_ids:
+                groups.append(group)
+            continue
+        if message.role == "tool":
+            index += 1
+            continue
+        if message.to_llm_message() is None:
+            index += 1
+            continue
+        groups.append([message])
+        index += 1
+    return groups
+
+
+def _adjust_compaction_start(messages: list[ChatMessage], start: int) -> int:
+    if start <= 0 or start >= len(messages):
+        return max(0, start)
+
+    probe = start
+    saw_tool_block = False
+    while probe >= 0:
+        message = messages[probe]
+        if message.role == "tool":
+            saw_tool_block = True
+            probe -= 1
+            continue
+        if message.to_llm_message() is None:
+            saw_tool_block = True
+            probe -= 1
+            continue
+        if saw_tool_block and _tool_call_ids(message):
+            return probe
+        break
+    return start
+
+
 @dataclass(slots=True)
 class ContextUsage:
     used_tokens: int
@@ -62,8 +143,10 @@ class ContextManager:
             return
 
         keep_tail = max(10, min(16, len(session.messages)))
-        head = session.messages[:-keep_tail]
-        tail = session.messages[-keep_tail:]
+        tail_start = max(0, len(session.messages) - keep_tail)
+        tail_start = _adjust_compaction_start(session.messages, tail_start)
+        head = session.messages[:tail_start]
+        tail = session.messages[tail_start:]
         if not head:
             return
 
@@ -100,18 +183,23 @@ class ContextManager:
             cutoff = session.message_index(upto_message_id)
             transcript = session.messages[: cutoff + 1]
         selected_payloads: list[dict[str, Any]] = []
-        for message in reversed(transcript):
-            payload = message.to_llm_message()
-            if payload is None:
-                continue
-            message_tokens = estimate_tokens(message.content) + 24
-            if used_tokens + message_tokens > budget and selected:
+        groups = _group_llm_messages(transcript)
+        selected_groups: list[list[ChatMessage]] = []
+        for group in reversed(groups):
+            group_tokens = sum(_message_token_cost(message) for message in group)
+            if used_tokens + group_tokens > budget and selected_groups:
                 break
-            selected.append(message)
-            selected_payloads.append(payload)
-            used_tokens += message_tokens
-        selected.reverse()
-        selected_payloads.reverse()
+            selected_groups.append(group)
+            used_tokens += group_tokens
+
+        selected_groups.reverse()
+        for group in selected_groups:
+            for message in group:
+                payload = message.to_llm_message()
+                if payload is None:
+                    continue
+                selected.append(message)
+                selected_payloads.append(payload)
 
         messages.extend(selected_payloads)
         usage = ContextUsage(
