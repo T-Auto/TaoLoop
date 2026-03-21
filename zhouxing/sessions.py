@@ -306,7 +306,13 @@ class SessionStore:
         for path in self.sessions_dir.glob("*.json"):
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as exc:
+                if self.logger:
+                    self.logger.log(
+                        "session_file_corrupted",
+                        path=str(path),
+                        error=str(exc),
+                    )
                 continue
             snapshots.append(SessionRecord.from_dict(payload).snapshot())
         snapshots.sort(key=lambda item: item["updated_at"], reverse=True)

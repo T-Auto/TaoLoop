@@ -152,13 +152,26 @@ class ToolRegistry:
                 "type": "function",
                 "function": {
                     "name": "write_file",
-                    "description": "Create or overwrite a file. Use append=true to append content.",
+                    "description": (
+                        "Create or overwrite a file with text content. "
+                        "Use append=true to append instead of overwrite. "
+                        "CRITICAL: Keep each call's content under 2000 characters to avoid API truncation. "
+                        "For large files, split into multiple calls: first call with append=false (creates file), "
+                        "subsequent calls with append=true (each <=2000 chars). "
+                        "Never attempt to write an entire large file in one call."
+                    ),
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "path": {"type": "string"},
-                            "content": {"type": "string"},
-                            "append": {"type": "boolean"},
+                            "content": {
+                                "type": "string",
+                                "description": "Text to write. Keep under 2000 characters per call.",
+                            },
+                            "append": {
+                                "type": "boolean",
+                                "description": "If true, append to existing file instead of overwriting.",
+                            },
                         },
                         "required": ["path", "content"],
                     },
@@ -285,6 +298,8 @@ class ToolRegistry:
     ) -> str:
         if self.logger:
             self.logger.log("tool_execute_start", tool=name, arguments=arguments)
+        if arguments.get("_argument_parse_error"):
+            return arguments.get("_argument_parse_error_message", "工具参数 JSON 解析失败，请分段重试。")
         if name == "list_directory":
             result = await self._list_directory(**arguments)
         elif name == "read_file":
@@ -522,7 +537,14 @@ class ToolRegistry:
         with target.open(mode, encoding="utf-8", newline="") as handle:
             handle.write(content)
         action = "appended to" if append else "wrote"
-        return f"{action} {target} ({len(content)} chars)"
+        size_after = target.stat().st_size
+        result = f"{action} {target} ({len(content)} chars written, {size_after} bytes total)"
+        if len(content) > 2000:
+            result += (
+                f"\n[WARNING] This write was {len(content)} chars which exceeds the recommended 2000-char limit. "
+                "Future calls may get truncated. Split content into smaller chunks."
+            )
+        return result
 
     async def _insert_text(
         self,

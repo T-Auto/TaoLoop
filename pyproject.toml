@@ -7,9 +7,16 @@ requires-python = ">=3.12"
 dependencies = [
   "gputil>=1.4.0",
   "httpx>=0.28.1",
+  "matplotlib>=3.10.8",
   "numpy>=2.4.3",
+  "pandas>=3.0.1",
   "psutil>=7.0.0",
+  "scipy>=1.17.1",
   "setuptools>=82.0.1",
+  "torch",
+  "torchaudio>=2.10.0",
+  "torchvision",
+  "tqdm>=4.67.3",
 ]
 
 [project.scripts]

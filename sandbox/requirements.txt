@@ -1,0 +1,12 @@
+# 扫雷神经网络训练依赖
+# PyTorch (已通过uv安装)
+# torch
+# torchvision
+# torchaudio
+
+# 其他依赖
+numpy>=1.21.0
+matplotlib>=3.5.0
+tqdm>=4.64.0
+scipy>=1.8.0
+scikit-learn>=1.0.0

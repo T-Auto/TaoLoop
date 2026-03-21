@@ -232,6 +232,25 @@ class BackendServer:
         await self._emit_jobs_changed(await self.background_jobs.list_jobs(include_finished=True, max_jobs=200))
 
         worker = asyncio.create_task(self._user_worker())
+
+        async def _watch_worker() -> None:
+            """监视 worker，如果意外退出则自动重启。"""
+            nonlocal worker
+            while True:
+                await asyncio.sleep(1)
+                if worker.done():
+                    exc = worker.exception() if not worker.cancelled() else None
+                    self.logger.log(
+                        "backend_worker_restarting",
+                        cancelled=worker.cancelled(),
+                        error=str(exc) if exc else None,
+                    )
+                    if exc:
+                        await self._emit_error(f"Agent worker crashed and restarted: {exc}")
+                    self.busy = False
+                    worker = asyncio.create_task(self._user_worker())
+
+        watcher = asyncio.create_task(_watch_worker())
         try:
             while True:
                 request = await self.request_queue.get()
@@ -240,11 +259,13 @@ class BackendServer:
                     break
                 await self._handle_request(request)
         finally:
+            watcher.cancel()
             worker.cancel()
-            try:
-                await worker
-            except asyncio.CancelledError:
-                pass
+            for task in (watcher, worker):
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
             await self.background_jobs.shutdown()
 
     async def _handle_request(self, request: dict[str, Any]) -> None:
@@ -343,7 +364,8 @@ class BackendServer:
                     "message_id": message.id,
                 }
             )
-            await self._emit_status("queued")
+            # 如果 agent 已在运行，保持 "running" 显示，避免覆盖成 "queued" 让用户误以为卡死
+            await self._emit_status("running" if self.busy else "queued")
             return
 
         if request_type == "invalid":
@@ -355,36 +377,50 @@ class BackendServer:
     async def _user_worker(self) -> None:
         while True:
             task = await self.user_queue.get()
-            session_id = task["session_id"]
-            message_id = task["message_id"]
-            self.logger.log("backend_worker_start", session_id=session_id, message_id=message_id)
-            self.busy = True
-            await self._emit_status("running")
+            session_id: str | None = None
+            message_id: str | None = None
             try:
-                await self._flush_message_buffer()
-                session = self._get_session(session_id)
-                self.active_session = session
-                usage = await self.agent.run_turn(session, message_id)
-                await self._resume_background_monitoring_if_needed(session, task)
-                session.meta["context"] = usage
-                self.store.save(session)
-                self.active_session = session
-                await self._flush_message_buffer()
-                self.logger.log("backend_worker_finish", session_id=session_id, message_id=message_id, usage=usage)
-            except Exception as exc:
+                session_id = task["session_id"]
+                message_id = task["message_id"]
+                self.logger.log("backend_worker_start", session_id=session_id, message_id=message_id)
+                self.busy = True
+                await self._emit_status("running")
+                try:
+                    await self._flush_message_buffer()
+                    session = self._get_session(session_id)
+                    self.active_session = session
+                    usage = await self.agent.run_turn(session, message_id)
+                    await self._resume_background_monitoring_if_needed(session, task)
+                    session.meta["context"] = usage
+                    self.store.save(session)
+                    self.active_session = session
+                    await self._flush_message_buffer()
+                    self.logger.log("backend_worker_finish", session_id=session_id, message_id=message_id, usage=usage)
+                except Exception as exc:
+                    self.logger.exception(
+                        "backend_worker_exception",
+                        exc,
+                        session_id=session_id,
+                        message_id=message_id,
+                    )
+                    await self._emit_error(str(exc))
+                finally:
+                    self.busy = False
+                    await self._flush_message_buffer()
+                    await self._emit_status("idle")
+                    await self._emit_session_list()
+            except Exception as outer_exc:
                 self.logger.exception(
-                    "backend_worker_exception",
-                    exc,
+                    "backend_worker_task_error",
+                    outer_exc,
                     session_id=session_id,
                     message_id=message_id,
+                    task=str(task)[:400],
                 )
-                await self._emit_error(str(exc))
-            finally:
+                await self._emit_error(f"Worker task error (session={session_id}): {outer_exc}")
                 self.busy = False
-                await self._flush_message_buffer()
-                await self._emit_status("idle")
+            finally:
                 self.user_queue.task_done()
-                await self._emit_session_list()
 
     async def _resume_background_monitoring_if_needed(
         self,

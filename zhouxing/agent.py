@@ -56,6 +56,9 @@ class ConversationAgent:
         display_anchor_id = reply_to_message_id
         autonomous_deadline = self._autonomous_deadline()
         step = 0
+        consecutive_tool_failures = 0
+        last_failed_tool_name: str | None = None
+        MAX_CONSECUTIVE_FAILURES = 3
 
         while True:
             if self._autonomous_window_expired(autonomous_deadline):
@@ -194,14 +197,65 @@ class ConversationAgent:
                             }
                         )
                     )
+                    is_known_error = "_argument_parse_error" in call.arguments
                     try:
                         result = await self.tools.execute(
                             call.name,
                             call.arguments,
                             event_cursor=tool_event_cursor,
                         )
+                        is_known_error = is_known_error or self._is_tool_error_result(result)
                     except Exception as exc:
                         result = f"Tool {call.name} failed: {exc}"
+                        is_known_error = True
+
+                    if is_known_error:
+                        if last_failed_tool_name == call.name:
+                            consecutive_tool_failures += 1
+                        else:
+                            consecutive_tool_failures = 1
+                            last_failed_tool_name = call.name
+                    else:
+                        consecutive_tool_failures = 0
+                        last_failed_tool_name = None
+
+                    if consecutive_tool_failures >= MAX_CONSECUTIVE_FAILURES:
+                        abort_message = ChatMessage.create(
+                            "assistant",
+                            (
+                                f"工具 `{call.name}` 已连续失败 {consecutive_tool_failures} 次，"
+                                "已自动终止重试以避免无限循环。\n"
+                                "可能原因：\n"
+                                "1. 文件内容过大导致工具参数 JSON 被截断——请改用分段写入（多次调用并使用 append=true）\n"
+                                "2. 路径或参数格式有误\n"
+                                "请调整策略后重试。"
+                            ),
+                            meta={"tool_failure_abort": True, "tool": call.name, "failures": consecutive_tool_failures},
+                        )
+                        session.insert_after(anchor_id, abort_message)
+                        session.meta["runtime_state"] = {
+                            "phase": "idle",
+                            "reason": "tool_failure_abort",
+                            "reply_to_message_id": reply_to_message_id,
+                        }
+                        await self.emit(
+                            {
+                                "type": "message",
+                                "message": abort_message.to_public_dict(),
+                                "after_message_id": display_anchor_id,
+                            }
+                        )
+                        if self.logger:
+                            self.logger.log(
+                                "agent_turn_finish",
+                                session_id=session.id,
+                                assistant_message_id=abort_message.id,
+                                mode="tool_failure_abort",
+                                tool=call.name,
+                                consecutive_failures=consecutive_tool_failures,
+                            )
+                        return usage_info
+
                     tool_message = ChatMessage.create(
                         "tool",
                         result,
@@ -316,6 +370,13 @@ class ConversationAgent:
             current_anchor = tool_message.id
             current_display_anchor = tool_message.id
         return current_anchor, current_display_anchor
+
+    @staticmethod
+    def _is_tool_error_result(result: str) -> bool:
+        return (
+            result.startswith("Tool ")
+            and "failed" in result
+        ) or "参数 JSON 解析失败" in result or "_argument_parse_error" in result
 
     def _autonomous_deadline(self) -> float | None:
         limit_sec = max(0, self.config.autonomous_run_limit_sec)

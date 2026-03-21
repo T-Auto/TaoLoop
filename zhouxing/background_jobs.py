@@ -164,7 +164,13 @@ class BackgroundJobManager:
                 continue
             try:
                 await job.task
-            except Exception:
+            except Exception as exc:
+                if self.logger:
+                    self.logger.log(
+                        "background_job_shutdown_error",
+                        job_id=job.id,
+                        error=str(exc),
+                    )
                 continue
 
     async def list_jobs(
@@ -202,7 +208,16 @@ class BackgroundJobManager:
                 try:
                     await asyncio.wait_for(asyncio.shield(job.task), timeout=15)
                 except asyncio.TimeoutError:
-                    pass
+                    job.status = "stop_timeout"
+                    job.finished_at = now_iso()
+                    job.finished_runtime_sec = job.last_runtime_sec()
+                    if self.logger:
+                        self.logger.log(
+                            "background_job_stop_timeout",
+                            job_id=job.id,
+                            pid=job.pid,
+                            runtime_sec=job.runtime_sec(),
+                        )
         return job
 
     async def _run_job(self, job: BackgroundJob) -> None:

@@ -13,6 +13,49 @@ from .config import Config
 from .logging_utils import FileLogger
 
 
+_WRITE_TOOLS = {"write_file", "insert_text", "replace_in_file"}
+_PATH_RE = re.compile(r'"path"\s*:\s*"((?:[^"\\]|\\.)*)"')
+_APPEND_RE = re.compile(r'"append"\s*:\s*(true|false)')
+
+
+def _make_parse_error_arguments(
+    tool_name: str,
+    raw: str,
+    exc: json.JSONDecodeError,
+) -> dict:
+    """从截断/格式错误的 JSON 中尽量提取可用字段，并返回带恢复指引的参数字典。"""
+    path_match = _PATH_RE.search(raw)
+    extracted_path = path_match.group(1) if path_match else None
+
+    append_match = _APPEND_RE.search(raw)
+    is_append = append_match and append_match.group(1) == "true"
+
+    hint_lines = [
+        f"工具参数 JSON 解析失败（内容可能被 API 截断）：{exc}",
+        f"原始参数预览（前500字符）：{raw[:500]}",
+        "",
+    ]
+    if extracted_path:
+        action = "追加到" if is_append else "创建"
+        hint_lines.append(f"检测到目标文件：{extracted_path}（{action}模式）")
+    if tool_name in _WRITE_TOOLS:
+        hint_lines += [
+            "【恢复策略】内容过长导致单次调用 JSON 被截断，请严格按以下步骤重试：",
+            "  1. 将要写入的内容拆分为多个片段，每段不超过 2000 字符；",
+            "  2. 第一段用 write_file（append=false）写入；",
+            "  3. 后续每段用 write_file（append=true）追加；",
+            "  4. 每次调用只传一个片段，不要在一次调用中传入完整文件。",
+        ]
+    else:
+        hint_lines.append("请检查参数格式并重试。")
+
+    return {
+        "_argument_parse_error": True,
+        "_argument_parse_error_message": "\n".join(hint_lines),
+        "_extracted_path": extracted_path,
+    }
+
+
 @dataclass(slots=True)
 class ToolCall:
     id: str
@@ -53,6 +96,7 @@ class DeepSeekClient:
             "tools": tools,
             "tool_choice": "auto",
             "temperature": 0.1,
+            "max_tokens": 8192,
             "stream": False,
         }
         attempts = max(1, self.config.request_retries + 1)
@@ -155,8 +199,12 @@ class DeepSeekClient:
             arguments_text = item["function"].get("arguments", "{}")
             try:
                 arguments = json.loads(arguments_text)
-            except json.JSONDecodeError:
-                arguments = {}
+            except json.JSONDecodeError as parse_exc:
+                arguments = _make_parse_error_arguments(
+                    item["function"].get("name", ""),
+                    arguments_text,
+                    parse_exc,
+                )
             tool_calls.append(
                 ToolCall(
                     id=item["id"],
