@@ -263,7 +263,7 @@ func TestRenderStatusShowsCopyHint(t *testing.T) {
 	}
 
 	status := m.renderStatus()
-	for _, want := range []string{"状态测试", "Ctrl+Y/F5 复制", "Ctrl+O 日志", "logs 折叠"} {
+	for _, want := range []string{"状态测试", "Ctrl+S 多行发送", "Ctrl+Y/F5 复制", "Ctrl+O 日志", "logs 折叠"} {
 		if !contains(status, want) {
 			t.Fatalf("status missing hint %q: %s", want, status)
 		}
@@ -530,6 +530,20 @@ func TestBuildPendingTranscriptPrintTextOnlyPrintsNewBlocks(t *testing.T) {
 	}
 }
 
+func TestWrapTranscriptPrintTextHardwrapsLongLines(t *testing.T) {
+	text := "> abcdefghijklmnopqrstuvwxyz\n\n第二行"
+	wrapped := wrapTranscriptPrintText(text, 10)
+
+	if !contains(wrapped, "\n") {
+		t.Fatalf("expected wrapped transcript to contain newlines: %q", wrapped)
+	}
+	for _, line := range strings.Split(wrapped, "\n") {
+		if ansi.StringWidth(line) > 10 {
+			t.Fatalf("wrapped line exceeds width: %q", line)
+		}
+	}
+}
+
 func TestHighlightCommandTextPreservesCommandText(t *testing.T) {
 	raw := highlightCommandText("$ git diff --stat .\\internal\\tui\\model.go")
 	if got := ansi.Strip(raw); got != "$ git diff --stat .\\internal\\tui\\model.go" {
@@ -555,7 +569,7 @@ func TestHighlightCodeLineContentMarksDiffAddsAndDeletes(t *testing.T) {
 	}
 }
 
-func TestCtrlVPastesClipboardIntoInput(t *testing.T) {
+func TestInsertPastesClipboardIntoInput(t *testing.T) {
 	oldReadClipboard := readClipboard
 	oldTimeNow := timeNow
 	defer func() {
@@ -576,7 +590,7 @@ func TestCtrlVPastesClipboardIntoInput(t *testing.T) {
 	}
 	m.input.Focus()
 
-	updatedModel, _ := m.updateChat(tea.KeyMsg{Type: tea.KeyCtrlV})
+	updatedModel, _ := m.updateChat(tea.KeyMsg{Type: tea.KeyInsert})
 	updated := updatedModel.(Model)
 
 	if updated.notice != "已从系统剪贴板粘贴" {
@@ -608,7 +622,7 @@ func TestEnterDuringPasteBurstInsertsNewlineInsteadOfSending(t *testing.T) {
 	}
 	m.input.Focus()
 
-	updatedModel, _ := m.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("hello")})
+	updatedModel, _ := m.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("hello"), Paste: true})
 	updated := updatedModel.(Model)
 
 	now = now.Add(10 * time.Millisecond)
@@ -620,6 +634,97 @@ func TestEnterDuringPasteBurstInsertsNewlineInsteadOfSending(t *testing.T) {
 	}
 	if got := updated.input.Value(); got != "hello\n" {
 		t.Fatalf("unexpected input after enter: %q", got)
+	}
+}
+
+func TestEnterSendsMultiRuneInputWithoutPasteFlag(t *testing.T) {
+	var sink bytes.Buffer
+	m := Model{
+		mode:  modeChat,
+		input: textarea.New(),
+		backend: &BackendClient{
+			stdin: nopWriteCloser{Buffer: &sink},
+		},
+	}
+	m.input.Focus()
+
+	updatedModel, _ := m.updateChat(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("你好世界")})
+	updated := updatedModel.(Model)
+
+	updatedModel, _ = updated.updateChat(tea.KeyMsg{Type: tea.KeyEnter})
+	updated = updatedModel.(Model)
+
+	if sink.Len() == 0 {
+		t.Fatalf("expected enter to send multi-rune input")
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(sink.Bytes(), &payload); err != nil {
+		t.Fatalf("decode payload failed: %v; raw=%q", err, sink.String())
+	}
+	if payload["type"] != "user_message" {
+		t.Fatalf("unexpected request type: %#v", payload)
+	}
+	if payload["content"] != "你好世界" {
+		t.Fatalf("unexpected content: %#v", payload["content"])
+	}
+	if got := updated.input.Value(); got != "" {
+		t.Fatalf("expected input to reset after send, got %q", got)
+	}
+}
+
+func TestEnterDoesNotSendWhenInputAlreadyMultiline(t *testing.T) {
+	var sink bytes.Buffer
+	m := Model{
+		mode:  modeChat,
+		input: textarea.New(),
+		backend: &BackendClient{
+			stdin: nopWriteCloser{Buffer: &sink},
+		},
+	}
+	m.input.Focus()
+	m.input.SetValue("第一行\n第二行")
+
+	updatedModel, _ := m.updateChat(tea.KeyMsg{Type: tea.KeyEnter})
+	updated := updatedModel.(Model)
+
+	if sink.Len() != 0 {
+		t.Fatalf("expected multiline enter to stay in editor, got %q", sink.String())
+	}
+	if got := updated.input.Value(); got != "第一行\n第二行\n" {
+		t.Fatalf("unexpected multiline input after enter: %q", got)
+	}
+}
+
+func TestCtrlSSendsMultilineInput(t *testing.T) {
+	var sink bytes.Buffer
+	m := Model{
+		mode:  modeChat,
+		input: textarea.New(),
+		backend: &BackendClient{
+			stdin: nopWriteCloser{Buffer: &sink},
+		},
+	}
+	m.input.Focus()
+	m.input.SetValue("第一行\n第二行")
+
+	updatedModel, _ := m.updateChat(tea.KeyMsg{Type: tea.KeyCtrlS})
+	updated := updatedModel.(Model)
+
+	if sink.Len() == 0 {
+		t.Fatalf("expected ctrl+s to send multiline input")
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(sink.Bytes(), &payload); err != nil {
+		t.Fatalf("decode payload failed: %v; raw=%q", err, sink.String())
+	}
+	if payload["type"] != "user_message" {
+		t.Fatalf("unexpected request type: %#v", payload)
+	}
+	if payload["content"] != "第一行\n第二行" {
+		t.Fatalf("unexpected content: %#v", payload["content"])
+	}
+	if got := updated.input.Value(); got != "" {
+		t.Fatalf("expected input to reset after ctrl+s send, got %q", got)
 	}
 }
 

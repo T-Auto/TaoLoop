@@ -175,7 +175,6 @@ var readClipboard = clipboard.ReadAll
 var timeNow = time.Now
 
 const pasteBurstWindow = 40 * time.Millisecond
-
 const (
 	foldedPreviewHeadLines = 2
 	foldedPreviewTailLines = 2
@@ -263,9 +262,10 @@ func New(rootDir string) (Model, error) {
 	sessionList.SetFilteringEnabled(true)
 
 	input := textarea.New()
-	input.Placeholder = "输入消息，Enter 发送，Ctrl+V/Insert 粘贴，Ctrl+O 折叠日志，Ctrl+Y/F5 复制，Ctrl+L 会话列表"
+	input.Placeholder = "输入消息。Enter 发送，Ctrl+S 多行发送"
 	input.Prompt = "│ "
 	input.ShowLineNumbers = false
+	input.KeyMap.Paste.SetEnabled(false)
 	input.SetHeight(4)
 	input.Focus()
 
@@ -454,7 +454,7 @@ func (m Model) updateChat(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+n":
 		_ = m.backend.Send(map[string]any{"type": "create_session"})
 		return m, nil
-	case "ctrl+v", "insert":
+	case "insert":
 		return m.pasteIntoInput()
 	case "ctrl+y", "f5":
 		if err := m.copyActiveSessionToClipboard(); err != nil {
@@ -464,6 +464,8 @@ func (m Model) updateChat(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.notice = "已复制当前会话到系统剪贴板"
 		return m, nil
+	case "ctrl+s":
+		return m.submitInput()
 	case "ctrl+o":
 		m.collapseToolLogs = !m.collapseToolLogs
 		if m.collapseToolLogs {
@@ -502,22 +504,11 @@ func (m Model) updateChat(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.markLikelyPaste()
 			return m, nil
 		}
-		content := strings.TrimSpace(m.input.Value())
-		if content == "" {
+		if m.inputHasMultipleLines() {
+			m.input.InsertString("\n")
 			return m, nil
 		}
-		err := m.backend.Send(map[string]any{
-			"type":    "user_message",
-			"content": content,
-		})
-		if err != nil {
-			m.lastErr = err.Error()
-			return m, nil
-		}
-		m.input.Reset()
-		m.likelyPasteBurst = false
-		m.lastTextInputAt = time.Time{}
-		return m, nil
+		return m.submitInput()
 	}
 
 	m.trackTextEntry(msg)
@@ -538,6 +529,25 @@ func (m Model) updateChatInput(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
 	return m, cmd
+}
+
+func (m Model) submitInput() (tea.Model, tea.Cmd) {
+	content := strings.TrimSpace(m.input.Value())
+	if content == "" {
+		return m, nil
+	}
+	err := m.backend.Send(map[string]any{
+		"type":    "user_message",
+		"content": content,
+	})
+	if err != nil {
+		m.lastErr = err.Error()
+		return m, nil
+	}
+	m.input.Reset()
+	m.likelyPasteBurst = false
+	m.lastTextInputAt = time.Time{}
+	return m, nil
 }
 
 func (m *Model) applyEvent(event Event) tea.Cmd {
@@ -702,6 +712,7 @@ func (m *Model) flushTranscriptPrintCmd(reset bool) tea.Cmd {
 	if strings.TrimSpace(text) == "" {
 		return nil
 	}
+	text = wrapTranscriptPrintText(text, maxInt(1, m.width-1))
 	return tea.Println(text)
 }
 
@@ -726,6 +737,22 @@ func (m *Model) buildPendingTranscriptPrintText(reset bool) string {
 		pending = append(pending, block.text)
 	}
 	return strings.Join(pending, "\n\n")
+}
+
+func wrapTranscriptPrintText(text string, width int) string {
+	if width <= 1 || strings.TrimSpace(text) == "" {
+		return text
+	}
+	lines := strings.Split(text, "\n")
+	wrapped := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if line == "" {
+			wrapped = append(wrapped, "")
+			continue
+		}
+		wrapped = append(wrapped, ansi.Hardwrap(line, width, true))
+	}
+	return strings.Join(wrapped, "\n")
 }
 
 func buildTranscriptPrintBlocks(messages []ChatMessage, collapseToolLogs bool) []transcriptPrintBlock {
@@ -994,7 +1021,7 @@ func (m Model) renderStatus() string {
 	if m.collapseToolLogs {
 		logState = "logs 折叠"
 	}
-	help := "Ctrl+Y/F5 复制  Ctrl+O 日志  Ctrl+L 会话"
+	help := "Ctrl+S 多行发送  Ctrl+Y/F5 复制  Ctrl+O 日志  Ctrl+L 会话"
 	parts := []string{title, state}
 	if m.status.Model != "" {
 		parts = append(parts, m.status.Model)
@@ -1777,8 +1804,8 @@ func (m *Model) trackTextEntry(msg tea.KeyMsg) {
 		return
 	}
 	now := timeNow()
-	likelyPaste := msg.Paste || len(msg.Runes) > 1
-	if !m.lastTextInputAt.IsZero() && now.Sub(m.lastTextInputAt) <= pasteBurstWindow {
+	likelyPaste := msg.Paste
+	if m.likelyPasteBurst && !m.lastTextInputAt.IsZero() && now.Sub(m.lastTextInputAt) <= pasteBurstWindow {
 		likelyPaste = true
 	}
 	m.lastTextInputAt = now
@@ -1805,6 +1832,10 @@ func (m *Model) shouldTreatEnterAsPastedNewline() bool {
 		return false
 	}
 	return timeNow().Sub(m.lastTextInputAt) <= pasteBurstWindow
+}
+
+func (m *Model) inputHasMultipleLines() bool {
+	return strings.Contains(m.input.Value(), "\n")
 }
 
 func buildTranscriptText(session *SessionRecord) string {
