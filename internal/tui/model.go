@@ -232,13 +232,16 @@ type Model struct {
 	viewport viewport.Model
 	input    textarea.Model
 
-	sessions         []SessionSummary
-	activeSession    *SessionRecord
-	jobs             []BackgroundJob
-	followTail       bool
-	collapseToolLogs bool
-	printedBlockKeys map[string]struct{}
-	pendingDelete    *SessionSummary
+	sessions          []SessionSummary
+	activeSession     *SessionRecord
+	jobs              []BackgroundJob
+	jobsUpdatedAt     time.Time
+	thinkingStartedAt time.Time
+	thinkingBaseSec   int
+	followTail        bool
+	collapseToolLogs  bool
+	printedBlockKeys  map[string]struct{}
+	pendingDelete     *SessionSummary
 
 	lastTextInputAt  time.Time
 	likelyPasteBurst bool
@@ -596,14 +599,17 @@ func (m *Model) applyEvent(event Event) tea.Cmd {
 	case "status":
 		if event.Status != nil {
 			m.status = *event.Status
+			m.syncLiveThinkingPhase(m.status.Phase)
 		}
 		return nil
 	case "jobs":
 		m.jobs = event.Jobs
+		m.jobsUpdatedAt = timeNow()
 		return nil
 	case "progress":
 		if event.Progress != nil {
 			m.status.Phase = event.Progress.Phase
+			m.syncLiveThinkingPhase(m.status.Phase)
 			if event.Progress.Model != "" {
 				m.status.Model = event.Progress.Model
 			}
@@ -1030,9 +1036,9 @@ func (m Model) renderHeader(width int) string {
 func (m Model) renderStatus() string {
 	state := "idle"
 	if m.status.Busy {
-		state = m.spinner.View() + " " + m.status.Phase
+		state = m.spinner.View() + " " + m.liveStatusPhase()
 	} else if m.status.Phase != "" {
-		state = m.status.Phase
+		state = m.liveStatusPhase()
 	}
 	title := "周行"
 	if m.activeSession != nil && m.activeSession.Title != "" {
@@ -1063,6 +1069,54 @@ func (m Model) renderStatus() string {
 	return strings.Join(parts, "  |  ")
 }
 
+func (m *Model) syncLiveThinkingPhase(phase string) {
+	if !strings.HasPrefix(phase, "thinking") {
+		m.thinkingStartedAt = time.Time{}
+		m.thinkingBaseSec = 0
+		return
+	}
+	baseSec := parseThinkingPhaseSeconds(phase)
+	now := timeNow()
+	m.thinkingBaseSec = baseSec
+	m.thinkingStartedAt = now.Add(-time.Duration(baseSec) * time.Second)
+}
+
+func (m Model) liveStatusPhase() string {
+	phase := m.status.Phase
+	if !strings.HasPrefix(phase, "thinking") {
+		return phase
+	}
+	if m.thinkingStartedAt.IsZero() {
+		return phase
+	}
+	elapsed := int(timeNow().Sub(m.thinkingStartedAt).Seconds())
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	if elapsed == 0 {
+		return "thinking"
+	}
+	return fmt.Sprintf("thinking %ds", elapsed)
+}
+
+func parseThinkingPhaseSeconds(phase string) int {
+	if phase == "thinking" {
+		return 0
+	}
+	if !strings.HasPrefix(phase, "thinking ") || !strings.HasSuffix(phase, "s") {
+		return 0
+	}
+	value := strings.TrimSuffix(strings.TrimPrefix(phase, "thinking "), "s")
+	total := 0
+	for _, ch := range value {
+		if ch < '0' || ch > '9' {
+			return 0
+		}
+		total = total*10 + int(ch-'0')
+	}
+	return total
+}
+
 func (m Model) runningJobs() []BackgroundJob {
 	running := make([]BackgroundJob, 0, len(m.jobs))
 	for _, job := range m.jobs {
@@ -1085,7 +1139,7 @@ func (m Model) renderRunningJobs(width int) string {
 	for _, job := range jobs[:maxVisible] {
 		line := fmt.Sprintf(
 			"%s  %s  pid=%d  %s",
-			formatBackgroundRuntime(job.RuntimeSec),
+			formatBackgroundRuntime(m.liveBackgroundRuntimeSec(job)),
 			job.Status,
 			job.PID,
 			job.Command,
@@ -1099,6 +1153,20 @@ func (m Model) renderRunningJobs(width int) string {
 		lines = append(lines, logOmittedStyle.Width(width).Render(fmt.Sprintf("… +%d 个后台脚本", len(jobs)-maxVisible)))
 	}
 	return strings.Join(lines, "\n")
+}
+
+func (m Model) liveBackgroundRuntimeSec(job BackgroundJob) float64 {
+	if job.Status != "running" {
+		return job.RuntimeSec
+	}
+	if m.jobsUpdatedAt.IsZero() {
+		return job.RuntimeSec
+	}
+	elapsed := timeNow().Sub(m.jobsUpdatedAt).Seconds()
+	if elapsed <= 0 {
+		return job.RuntimeSec
+	}
+	return job.RuntimeSec + elapsed
 }
 
 func (m Model) renderSessionPickerHelp() string {
@@ -1495,6 +1563,12 @@ func summarizeToolCallHeader(toolName string, args map[string]any) string {
 		return "• Background " + command
 	case "list_background_jobs":
 		return "• Background jobs"
+	case "stop_background_job":
+		jobID := stringFromAny(args["job_id"])
+		if jobID == "" {
+			return "• Stopped background job"
+		}
+		return "• Stopped background job " + jobID
 	case "inspect_background_job":
 		jobID := stringFromAny(args["job_id"])
 		if jobID == "" {

@@ -137,24 +137,33 @@ class BackendServer:
     def _should_schedule_background_followup(self, session: SessionRecord, message: ChatMessage) -> bool:
         if message.role != "event":
             return False
-        if message.meta.get("background_job_phase") != "finish":
-            return False
+        phase = message.meta.get("background_job_phase")
         runtime_state = session.meta.get("runtime_state", {})
         if runtime_state.get("phase") != "sleeping":
             return False
-        if runtime_state.get("reason") != "background_job_started":
+        if runtime_state.get("reason") not in {"background_job_started", "background_job_heartbeat"}:
             return False
         if self.active_session is not None and self.active_session.id != session.id:
             return False
-        return True
+        if phase == "finish":
+            return True
+        if phase != "heartbeat":
+            return False
+        if message.meta.get("background_job_status") != "running":
+            return False
+        return int(message.meta.get("background_job_after_sec") or 0) >= 60
 
     async def _queue_background_followup(self, session: SessionRecord, message: ChatMessage) -> None:
+        phase = str(message.meta.get("background_job_phase") or "")
+        reason = "background_job_finish" if phase == "finish" else "background_job_heartbeat"
         session.meta["runtime_state"] = {
             "phase": "wakeup_pending",
-            "reason": "background_job_finish",
+            "reason": reason,
             "trigger_message_id": message.id,
+            "trigger_phase": phase,
             "background_job_id": message.meta.get("background_job_id"),
             "background_job_status": message.meta.get("background_job_status"),
+            "background_job_after_sec": message.meta.get("background_job_after_sec"),
         }
         self.store.save(session)
         if self.active_session is not None and self.active_session.id == session.id:
@@ -164,6 +173,9 @@ class BackendServer:
                 "session_id": session.id,
                 "message_id": message.id,
                 "source": "background_event",
+                "background_job_phase": phase,
+                "background_job_id": message.meta.get("background_job_id"),
+                "background_job_after_sec": message.meta.get("background_job_after_sec"),
             }
         )
         if self.logger:
@@ -353,6 +365,7 @@ class BackendServer:
                 session = self._get_session(session_id)
                 self.active_session = session
                 usage = await self.agent.run_turn(session, message_id)
+                await self._resume_background_monitoring_if_needed(session, task)
                 session.meta["context"] = usage
                 self.store.save(session)
                 self.active_session = session
@@ -372,6 +385,30 @@ class BackendServer:
                 await self._emit_status("idle")
                 self.user_queue.task_done()
                 await self._emit_session_list()
+
+    async def _resume_background_monitoring_if_needed(
+        self,
+        session: SessionRecord,
+        task: dict[str, Any],
+    ) -> None:
+        if task.get("source") != "background_event":
+            return
+        if task.get("background_job_phase") != "heartbeat":
+            return
+        running_jobs = await self.background_jobs.list_jobs(
+            session_id=session.id,
+            include_finished=False,
+            max_jobs=1,
+        )
+        if not running_jobs:
+            return
+        session.meta["runtime_state"] = {
+            "phase": "sleeping",
+            "reason": "background_job_heartbeat",
+            "reply_to_message_id": task.get("message_id"),
+            "background_job_id": task.get("background_job_id"),
+            "background_job_after_sec": task.get("background_job_after_sec"),
+        }
 
     async def _emit_session_list(self) -> None:
         await self.emit({"type": "session_list", "sessions": self.store.list_sessions()})

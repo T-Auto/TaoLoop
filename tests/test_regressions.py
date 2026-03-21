@@ -43,6 +43,8 @@ class ContextRegressionTests(unittest.TestCase):
         self.assertIn("项目根目录的 `uv` 和 `.venv`", SYSTEM_PROMPT)
         self.assertIn("不要回退到系统 Python 或裸 `pip`", SYSTEM_PROMPT)
         self.assertIn("cwd=sandbox:.", SYSTEM_PROMPT)
+        self.assertIn("20 秒心跳只做展示", SYSTEM_PROMPT)
+        self.assertIn("stop_background_job", SYSTEM_PROMPT)
 
     def test_adjust_compaction_start_rewinds_to_assistant_tool_call(self) -> None:
         messages = [
@@ -416,7 +418,7 @@ class ToolRegressionTests(unittest.TestCase):
 
 
 class BackendRegressionTests(unittest.TestCase):
-    def test_should_schedule_background_followup_only_for_sleeping_finish_event(self) -> None:
+    def test_should_schedule_background_followup_for_finish_and_late_heartbeats(self) -> None:
         backend = BackendServer.__new__(BackendServer)
         backend.active_session = SessionRecord.create("backend-followup")
         session = backend.active_session
@@ -440,14 +442,50 @@ class BackendRegressionTests(unittest.TestCase):
                 "background_job_phase": "heartbeat",
                 "background_job_id": "job_1",
                 "background_job_status": "running",
+                "background_job_after_sec": 20,
+            },
+        )
+        late_heartbeat_message = ChatMessage.create(
+            "event",
+            "后台脚本心跳",
+            meta={
+                "background_job_phase": "heartbeat",
+                "background_job_id": "job_1",
+                "background_job_status": "running",
+                "background_job_after_sec": 60,
             },
         )
 
         self.assertTrue(backend._should_schedule_background_followup(session, finish_message))
         self.assertFalse(backend._should_schedule_background_followup(session, heartbeat_message))
+        self.assertTrue(backend._should_schedule_background_followup(session, late_heartbeat_message))
 
         session.meta["runtime_state"] = {"phase": "idle"}
         self.assertFalse(backend._should_schedule_background_followup(session, finish_message))
+
+    def test_resume_background_monitoring_after_heartbeat_turn(self) -> None:
+        backend = BackendServer.__new__(BackendServer)
+        session = SessionRecord.create("background-monitor")
+        backend.background_jobs = _ListJobsStub(
+            [{"id": "job_1", "status": "running", "session_id": session.id}]
+        )
+
+        asyncio.run(
+            backend._resume_background_monitoring_if_needed(
+                session,
+                {
+                    "source": "background_event",
+                    "message_id": "msg_heartbeat",
+                    "background_job_phase": "heartbeat",
+                    "background_job_id": "job_1",
+                    "background_job_after_sec": 60,
+                },
+            )
+        )
+
+        self.assertEqual(session.meta["runtime_state"]["phase"], "sleeping")
+        self.assertEqual(session.meta["runtime_state"]["reason"], "background_job_heartbeat")
+        self.assertEqual(session.meta["runtime_state"]["background_job_id"], "job_1")
 
 
 def capture_emit(sink: list[dict]):
@@ -485,6 +523,22 @@ class StubTools:
         if delay > 0:
             await asyncio.sleep(delay)
         return self.results[name]
+
+
+class _ListJobsStub:
+    def __init__(self, jobs: list[dict[str, Any]]) -> None:
+        self.jobs = jobs
+
+    async def list_jobs(
+        self,
+        *,
+        session_id: str | None = None,
+        include_finished: bool = False,
+        max_jobs: int = 20,
+    ) -> list[dict[str, Any]]:
+        del include_finished
+        matches = [job for job in self.jobs if session_id is None or job.get("session_id") == session_id]
+        return matches[:max_jobs]
 
 
 if __name__ == "__main__":

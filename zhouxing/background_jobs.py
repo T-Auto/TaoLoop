@@ -192,6 +192,19 @@ class BackgroundJobManager:
         async with self._lock:
             return self.jobs.get(job_id)
 
+    async def stop_job(self, job_id: str) -> BackgroundJob:
+        job = await self.get_job(job_id)
+        if job is None:
+            raise ValueError(f"background job not found: {job_id}")
+        if job.status == "running":
+            await self._terminate_process_tree(job.pid)
+            if job.task is not None:
+                try:
+                    await asyncio.wait_for(asyncio.shield(job.task), timeout=15)
+                except asyncio.TimeoutError:
+                    pass
+        return job
+
     async def _run_job(self, job: BackgroundJob) -> None:
         stdout_task = asyncio.create_task(self._pump_stream(job, job.process.stdout, "stdout"))
         stderr_task = asyncio.create_task(self._pump_stream(job, job.process.stderr, "stderr"))
@@ -293,6 +306,7 @@ class BackgroundJobManager:
                         "background_job_id": job.id,
                         "background_job_phase": "heartbeat",
                         "background_job_status": job.status,
+                        "background_job_after_sec": interval,
                     },
                 ),
             )
@@ -318,6 +332,7 @@ class BackgroundJobManager:
         after_sec: int = 0,
     ) -> str:
         lines = []
+        tail_limit = 6 if phase == "heartbeat" else 8
         if phase == "heartbeat":
             lines.append("后台脚本心跳")
         else:
@@ -338,7 +353,7 @@ class BackgroundJobManager:
             lines.append(f"exit_code={job.exit_code}")
         lines.append(f"timed_out={job.timed_out}")
         lines.append("recent_logs:")
-        tail_lines = job.tail_lines()
+        tail_lines = job.tail_lines(limit=tail_limit)
         if tail_lines:
             lines.extend(tail_lines)
         else:

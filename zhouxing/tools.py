@@ -248,6 +248,20 @@ class ToolRegistry:
             {
                 "type": "function",
                 "function": {
+                    "name": "stop_background_job",
+                    "description": "Stop one running background job by job_id. Use this when a simulation is clearly stuck, misconfigured, or producing abnormal logs before editing and relaunching it.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "job_id": {"type": "string"},
+                        },
+                        "required": ["job_id"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
                     "name": "inspect_background_job",
                     "description": "Inspect one background script with recent log tail, hardware state, and runtime metadata.",
                     "parameters": {
@@ -289,6 +303,8 @@ class ToolRegistry:
             result = await self._start_background_command(**arguments)
         elif name == "list_background_jobs":
             result = await self._list_background_jobs(**arguments)
+        elif name == "stop_background_job":
+            result = await self._stop_background_job(**arguments)
         elif name == "inspect_background_job":
             result = await self._inspect_background_job(**arguments)
         else:
@@ -866,6 +882,27 @@ class ToolRegistry:
         lines.append("hardware:")
         snapshot = job.last_snapshot or self.monitor.snapshot(job.pid if job.status == "running" else None)
         lines.extend(self.monitor.format_snapshot_lines(snapshot))
+        return "\n".join(lines)
+
+    async def _stop_background_job(self, job_id: str) -> str:
+        if self.background_jobs is None:
+            raise RuntimeError("Background job manager is unavailable.")
+        job = await self.background_jobs.stop_job(job_id)
+        lines = [
+            f"job_id={job.id}",
+            f"command={job.command}",
+            f"cwd={job.cwd}",
+            f"status={job.status}",
+            f"pid={job.pid}",
+            f"runtime_sec={job.runtime_sec()}",
+            f"timed_out={job.timed_out}",
+            "stop_requested=true",
+        ]
+        if job.exit_code is not None:
+            lines.append(f"exit_code={job.exit_code}")
+        last_log = job.tail_lines(limit=1)
+        if last_log:
+            lines.append(f"last_log={last_log[-1]}")
         return "\n".join(lines)
 
     async def _terminate_process_tree(self, pid: int) -> None:

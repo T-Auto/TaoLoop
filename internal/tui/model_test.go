@@ -120,6 +120,31 @@ func TestJobsEventRendersRunningScriptsBelowInput(t *testing.T) {
 	}
 }
 
+func TestLiveBackgroundRuntimeAdvancesBetweenHeartbeats(t *testing.T) {
+	previousNow := timeNow
+	defer func() { timeNow = previousNow }()
+
+	base := time.Date(2026, time.March, 21, 15, 0, 0, 0, time.Local)
+	timeNow = func() time.Time { return base }
+
+	m := Model{
+		jobs: []BackgroundJob{
+			{
+				ID:         "job_1",
+				Status:     "running",
+				RuntimeSec: 61,
+			},
+		},
+		jobsUpdatedAt: base,
+	}
+
+	timeNow = func() time.Time { return base.Add(9 * time.Second) }
+	got := formatBackgroundRuntime(m.liveBackgroundRuntimeSec(m.jobs[0]))
+	if got != "1m10s" {
+		t.Fatalf("expected live runtime to advance locally, got %q", got)
+	}
+}
+
 func TestSessionPickerViewShowsShortcutHints(t *testing.T) {
 	m := Model{
 		mode:   modeSessionPicker,
@@ -308,6 +333,28 @@ func TestRenderStatusShowsCopyHint(t *testing.T) {
 		if !contains(status, want) {
 			t.Fatalf("status missing hint %q: %s", want, status)
 		}
+	}
+}
+
+func TestRenderStatusThinkingCountsLocally(t *testing.T) {
+	previousNow := timeNow
+	defer func() { timeNow = previousNow }()
+
+	base := time.Date(2026, time.March, 21, 15, 10, 0, 0, time.Local)
+	timeNow = func() time.Time { return base }
+
+	m := Model{
+		status: StatusPayload{
+			Busy:  true,
+			Phase: "thinking 5s",
+		},
+	}
+	m.syncLiveThinkingPhase(m.status.Phase)
+
+	timeNow = func() time.Time { return base.Add(2 * time.Second) }
+	status := m.renderStatus()
+	if !contains(status, "thinking 7s") {
+		t.Fatalf("expected live thinking status, got %q", status)
 	}
 }
 
