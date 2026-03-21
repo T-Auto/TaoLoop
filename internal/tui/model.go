@@ -378,6 +378,7 @@ func (m Model) renderChatView() string {
 	status := truncateToWidth(m.renderStatus(), maxInt(1, m.width))
 	return strings.Join([]string{
 		status,
+		"",
 		m.input.View(),
 	}, "\n")
 }
@@ -668,17 +669,17 @@ func (m *Model) updateLayout() {
 	m.list.SetSize(listWidth, listHeight)
 
 	inputHeight := defaultInputHeight
-	if m.height <= 2 {
+	if m.height <= 3 {
 		inputHeight = 1
-	} else if m.height-1 < inputHeight {
-		inputHeight = m.height - 1
+	} else if m.height-2 < inputHeight {
+		inputHeight = m.height - 2
 	}
 	if inputHeight < 1 {
 		inputHeight = 1
 	}
 
 	m.viewport.Width = maxInt(1, m.width)
-	m.viewport.Height = maxInt(1, m.height-inputHeight-1)
+	m.viewport.Height = maxInt(1, m.height-inputHeight-2)
 	m.input.SetWidth(maxInt(1, m.width))
 	m.input.SetHeight(inputHeight)
 	m.rebuildViewport(false)
@@ -712,7 +713,7 @@ func (m *Model) flushTranscriptPrintCmd(reset bool) tea.Cmd {
 	if strings.TrimSpace(text) == "" {
 		return nil
 	}
-	text = wrapTranscriptPrintText(text, maxInt(1, m.width-1))
+	text = formatTranscriptPrintText(text, maxInt(1, m.width-1))
 	return tea.Println(text)
 }
 
@@ -753,6 +754,14 @@ func wrapTranscriptPrintText(text string, width int) string {
 		wrapped = append(wrapped, ansi.Hardwrap(line, width, true))
 	}
 	return strings.Join(wrapped, "\n")
+}
+
+func formatTranscriptPrintText(text string, width int) string {
+	text = wrapTranscriptPrintText(text, width)
+	if strings.TrimSpace(text) == "" {
+		return text
+	}
+	return text + "\n"
 }
 
 func buildTranscriptPrintBlocks(messages []ChatMessage, collapseToolLogs bool) []transcriptPrintBlock {

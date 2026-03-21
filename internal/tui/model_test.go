@@ -460,6 +460,9 @@ func TestChatViewShowsBottomInputOnly(t *testing.T) {
 			t.Fatalf("chat view missing %q: %s", want, view)
 		}
 	}
+	if !contains(view, "\n\n│ ") {
+		t.Fatalf("chat view should keep a blank line before input: %q", view)
+	}
 	for _, unwanted := range []string{"请帮我检查日志折叠", "╭", "╰"} {
 		if contains(view, unwanted) {
 			t.Fatalf("chat view should not render transcript area or panel border %q: %s", unwanted, view)
@@ -541,6 +544,16 @@ func TestWrapTranscriptPrintTextHardwrapsLongLines(t *testing.T) {
 		if ansi.StringWidth(line) > 10 {
 			t.Fatalf("wrapped line exceeds width: %q", line)
 		}
+	}
+}
+
+func TestFormatTranscriptPrintTextAddsTrailingBlankLine(t *testing.T) {
+	formatted := formatTranscriptPrintText("> 第一条\n\n第二条", 20)
+	if !strings.HasSuffix(formatted, "\n") {
+		t.Fatalf("expected formatted transcript to end with a blank line: %q", formatted)
+	}
+	if !contains(formatted, "\n\n第二条") {
+		t.Fatalf("expected formatted transcript to preserve block spacing: %q", formatted)
 	}
 }
 
